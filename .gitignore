@@ -15,5 +15,10 @@ vgcore.*
 .DS_Store
 Thumbs.db
 
+# Editor settings
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+
 # Local
 /local
