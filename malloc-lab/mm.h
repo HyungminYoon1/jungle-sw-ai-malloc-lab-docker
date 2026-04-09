@@ -6,17 +6,16 @@ extern void mm_free (void *ptr);
 extern void *mm_realloc(void *ptr, size_t size);
 
 
-/* 
- * Students work in teams of one or two.  Teams enter their team name, 
- * personal names and login IDs in a struct of this
- * type in their bits.c file.
+/*
+ * 학생은 1명 또는 2명 팀으로 작업한다.
+ * 팀은 이 형식의 구조체에 팀 이름, 개인 이름, 로그인 ID를 입력한다.
  */
 typedef struct {
-    char *teamname; /* ID1+ID2 or ID1 */
-    char *name1;    /* full name of first member */
-    char *id1;      /* login ID of first member */
-    char *name2;    /* full name of second member (if any) */
-    char *id2;      /* login ID of second member */
+    char *teamname; /* ID1+ID2 또는 ID1 */
+    char *name1;    /* 첫 번째 팀원의 전체 이름 */
+    char *id1;      /* 첫 번째 팀원의 로그인 ID */
+    char *name2;    /* 두 번째 팀원의 전체 이름(있는 경우) */
+    char *id2;      /* 두 번째 팀원의 로그인 ID */
 } team_t;
 
 extern team_t team;

@@ -7,10 +7,10 @@ $size_increment = 5;
 $malloc_size = 16;
 $num_iters = 4800;
 
-# Open output file
+# 출력 파일 열기
 open OUTFILE, ">$out_filename" or die "Cannot create $out_filename\n";
 
-# Calculate misc parameters
+# 기타 매개변수 계산
 
 $suggested_heap_size = $realloc_size+$size_increment*($num_iters-1)+$malloc_size*$num_iters+100;
 $num_blocks = $num_iters + 1;

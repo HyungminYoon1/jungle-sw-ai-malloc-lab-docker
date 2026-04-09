@@ -5,10 +5,10 @@ $out_filename = "coalescing.rep";
 $blk_size = 4095;
 $num_iters = 2400;
 
-# Open output file
+# 출력 파일 열기
 open OUTFILE, ">$out_filename" or die "Cannot create $out_filename\n";
 
-# Calculate misc parameters
+# 기타 매개변수 계산
 $blk_size2 = 2*$blk_size;
 $suggested_heap_size = 2*$blk_size*$num_iters + 100;
 $num_blocks = 3*$num_iters;
