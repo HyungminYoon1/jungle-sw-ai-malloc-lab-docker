@@ -167,7 +167,7 @@ int main(int argc, char **argv)
 	 */
 	while ((c = getopt(argc, argv, "f:t:hvVgal")) != EOF)
 	{
-		printf("getopt returned: %d\n", c); // 디버깅용 출력 추가
+		printf("getopt returned: %c\n", c); // 디버깅용 출력 추가
 
 		switch (c)
 		{
