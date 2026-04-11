@@ -41,6 +41,12 @@ team_t team = {
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
+// heap checker 디버깅 레벨
+// 0: 검사 안 함
+// 1: 조용히 검사(에러만 출력)
+// 2: 자세히 출력
+#define DEBUG_LEVEL 0
+
 /* ALIGNMENT의 가장 가까운 배수로 올림 */
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
@@ -71,6 +77,12 @@ static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
+#if DEBUG_LEVEL
+static int in_heap(const void *p);
+static int aligned(const void *p);
+static void print_block(void *bp);
+static void mm_checkheap(int verbose);
+#endif
 
 /*
  * mm_init - malloc 패키지 초기화
@@ -90,9 +102,119 @@ int mm_init(void)
     // 비어있는 heap을 CHUNKSIZE 만큼의 free 블록으로 확장한다.
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
+
+#if DEBUG_LEVEL
+    mm_checkheap(DEBUG_LEVEL - 1);
+#endif
     
     return 0;
 }
+
+#if DEBUG_LEVEL
+// 주어진 포인터가 현재 힙 범위 내부를 가리키는지 검사한다.
+static int in_heap(const void *p)
+{
+    return p >= mem_heap_lo() && p <= mem_heap_hi();
+}
+
+// payload 주소가 ALIGNMENT 단위로 정렬되어 있는지 검사한다.
+static int aligned(const void *p)
+{
+    return ((size_t)p % ALIGNMENT) == 0;
+}
+
+// 디버깅용: 현재 블록의 헤더/푸터 정보를 사람이 읽기 쉽게 출력한다.
+static void print_block(void *bp)
+{
+    size_t hsize = GET_SIZE(HDRP(bp));
+    size_t halloc = GET_ALLOC(HDRP(bp));
+    size_t fsize = GET_SIZE(FTRP(bp));
+    size_t falloc = GET_ALLOC(FTRP(bp));
+
+    printf("%p: header[%zu:%c] footer[%zu:%c]\n",
+           bp,
+           hsize,
+           halloc ? 'a' : 'f',
+           fsize,
+           falloc ? 'a' : 'f');
+}
+
+/*
+ * mm_checkheap - 현재 implicit free list 기반 힙 구조가 올바른지 검사한다.
+ *
+ * 공통 힙 검사만 수행한다.
+ * 1. 프롤로그/에필로그가 정상인지
+ * 2. 모든 블록이 정렬되어 있는지
+ * 3. 헤더/푸터가 일치하는지
+ * 4. 인접한 두 free block이 연속으로 존재하지 않는지
+ */
+static void mm_checkheap(int verbose)
+{
+    void *bp;
+    int prev_free = 0;
+    size_t free_blocks = 0;
+
+    if (verbose)
+        printf("Heap (%p):\n", heap_listp);
+
+    // 프롤로그 블록은 크기 DSIZE의 할당 블록이어야 한다.
+    if (GET_SIZE(HDRP(heap_listp)) != DSIZE || !GET_ALLOC(HDRP(heap_listp))) {
+        printf("Error: bad prologue header\n");
+        return;
+    }
+
+    if (GET_SIZE(FTRP(heap_listp)) != DSIZE || !GET_ALLOC(FTRP(heap_listp))) {
+        printf("Error: bad prologue footer\n");
+        return;
+    }
+
+    // 힙 전체를 순회하며 블록 단위 불변식을 검사한다.
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        size_t hsize = GET_SIZE(HDRP(bp));
+        size_t halloc = GET_ALLOC(HDRP(bp));
+
+        if (verbose)
+            print_block(bp);
+
+        // payload는 정렬 단위를 만족해야 한다.
+        if (!aligned(bp))
+            printf("Error: %p is not aligned\n", bp);
+
+        // 헤더와 푸터는 힙 내부에 있어야 한다.
+        if (!in_heap(HDRP(bp)) || !in_heap(FTRP(bp)))
+            printf("Error: %p header/footer out of heap range\n", bp);
+
+        // 헤더와 푸터는 같은 값을 가져야 한다.
+        if (GET(HDRP(bp)) != GET(FTRP(bp)))
+            printf("Error: header does not match footer at %p\n", bp);
+
+        // 블록 크기는 정렬 단위의 배수여야 한다.
+        if (hsize % ALIGNMENT)
+            printf("Error: block size is not aligned at %p\n", bp);
+
+        // 프롤로그를 제외한 일반 블록은 최소 크기(16바이트) 이상이어야 한다.
+        if (bp != heap_listp && hsize < 2 * DSIZE)
+            printf("Error: block too small at %p\n", bp);
+
+        // 인접한 free block이 연속으로 존재하면 coalescing이 안 된 상태다.
+        if (!halloc) {
+            free_blocks++;
+            if (prev_free)
+                printf("Error: two consecutive free blocks at %p\n", bp);
+            prev_free = 1;
+        } else {
+            prev_free = 0;
+        }
+    }
+
+    // 마지막 블록은 크기 0의 할당된 에필로그 헤더여야 한다.
+    if (GET_SIZE(HDRP(bp)) != 0 || !GET_ALLOC(HDRP(bp)))
+        printf("Error: bad epilogue header\n");
+
+    if (verbose)
+        printf("Heap check complete: free blocks in heap = %zu\n", free_blocks);
+}
+#endif
 
 //  mm_malloc - implicit free list에서 요청 크기에 맞는 블록을 할당
 void *mm_malloc(size_t size)
@@ -113,6 +235,9 @@ void *mm_malloc(size_t size)
     // first fit 방식으로 들어갈 수 있는 free block을 찾으면 place()로 해당 블록에 배치하고 주소를 반환한다.
     if ((bp = find_fit(asize)) != NULL) {
         place(bp, asize);
+#if DEBUG_LEVEL
+        mm_checkheap(DEBUG_LEVEL - 1);
+#endif
         return bp;
     }
 
@@ -123,6 +248,9 @@ void *mm_malloc(size_t size)
 
     // 새로 확장한 free block에 요청 블록을 배치한 뒤 주소를 반환한다.
     place(bp, asize);
+#if DEBUG_LEVEL
+    mm_checkheap(DEBUG_LEVEL - 1);
+#endif
     return bp;
 }
 
@@ -177,6 +305,10 @@ void mm_free(void *bp)
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
     coalesce(bp);
+
+#if DEBUG_LEVEL
+    mm_checkheap(DEBUG_LEVEL - 1);
+#endif
 }
 
 // free 블록 병합 함수
