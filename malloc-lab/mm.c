@@ -94,24 +94,6 @@ int mm_init(void)
     return 0;
 }
 
-/*
- * naive mm_malloc - brk 포인터를 증가시켜 블록을 할당
- *     항상 정렬 단위의 배수 크기로 블록을 할당한다.
-
-void *mm_malloc(size_t size)
-{
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-        return NULL;
-    else
-    {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
-    }
-}
-*/
-
 //  mm_malloc - implicit free list에서 요청 크기에 맞는 블록을 할당
 void *mm_malloc(size_t size)
 {
@@ -225,15 +207,7 @@ static void *coalesce(void *bp)
     return bp;
 }
 
-// find_fit(size_t asize): 요청한 크기 asize를 담을 수 있는 free block을 힙에서 찾는 함수
-/*
-    GET_SIZE(HDRP(bp)) > 0: 에필로그 블록 전까지 순회
-    !GET_ALLOC(HDRP(bp)): 현재 블록이 free인지 검사
-    asize <= GET_SIZE(HDRP(bp)): 요청 크기를 수용 가능한지 검사
-    맞으면 그 블록 주소 반환
-    끝까지 없으면 NULL 반환
-*/
-
+// 요청한 크기 asize를 담을 수 있는 free block을 힙에서 찾는 함수
 static void *find_fit(size_t asize)
 {
     void *bp; // 현재 보고 있는 블록의 payload 시작 주소
@@ -272,28 +246,3 @@ void *mm_realloc(void *ptr, size_t size)
     return newptr; // 새 블록의 주소 반환
 }
 
-/*
- * naive mm_realloc - mm_malloc과 mm_free를 이용해 단순하게 구현
-
-    malloc이 들어오면 mem_sbrk()로 힙 끝을 그냥 늘림
-    free가 들어와도 사실상 아무 일도 안 함
-    이미 썼던 공간을 재사용하지 않음
-    그래서 구현은 쉽지만 메모리 효율이 매우 나쁨
- 
-void *mm_realloc(void *ptr, size_t size)
-{
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-        return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-        copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
-}
-    */
