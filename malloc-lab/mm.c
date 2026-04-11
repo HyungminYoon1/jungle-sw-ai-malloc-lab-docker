@@ -1,13 +1,14 @@
+/* =========================
+ * explicit free list용 추가 매크로/전역 변수
+ * ========================= */
 /*
- * mm-implicit free list - 해제된 블록을 힙 안에서 관리합니다.
+
+ * free block의 payload 앞부분에 prev/next 포인터를 저장한다.
  *
- * 각 블록에 헤더/푸터를 둠
- * 헤더/푸터에 블록 크기와 할당 여부를 저장함
- * free된 블록은 "힙 안에 그대로 남아 있는 빈 블록"이 됨
- * malloc이 오면 힙 처음부터 순회하면서 쓸 수 있는 free block을 찾음
- * 인접 free block이 있으면 coalesce로 합침
- * 
+ * free block layout:
+ * [ header | prev ptr | next ptr | ... | footer ]
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -41,6 +42,12 @@ team_t team = {
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
+// heap checker 디버깅 레벨
+// 0: 검사 안 함
+// 1: 조용히 검사(에러만 출력)
+// 2: 자세히 출력
+#define DEBUG_LEVEL 0
+
 /* ALIGNMENT의 가장 가까운 배수로 올림 */
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
@@ -63,7 +70,22 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-// #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+// free 블록 연결 리스트를 위한 포인터
+#define PREV_FREEP(bp) (*(void **)(bp))
+#define NEXT_FREEP(bp) (*(void **)((char *)(bp) + sizeof(void *)))
+
+#define SET_PREV_FREEP(bp, ptr) (PREV_FREEP(bp) = (ptr))
+#define SET_NEXT_FREEP(bp, ptr) (NEXT_FREEP(bp) = (ptr))
+
+/* 64비트 환경에서 prev/next 포인터 2개를 담을 수 있는 최소 free block 크기 */
+#define MINBLOCKSIZE (2 * DSIZE + 2 * sizeof(void *)) // 지금 컨테이너/Ubuntu 환경에서는 24가 나옴
+
+/* free list의 head */
+static void *free_listp = NULL;
+
+/* free list 조작 함수 */
+static void insert_free_block(void *bp);
+static void remove_free_block(void *bp);
 
 static char *heap_listp = NULL;
 
@@ -71,12 +93,22 @@ static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
+#if DEBUG_LEVEL
+static int in_heap(const void *p);
+static int aligned(const void *p);
+static void print_block(void *bp);
+static void mm_checkheap(int verbose);
+#endif
 
-/*
+ /* =========================
  * mm_init - malloc 패키지 초기화
- */
+ * ========================= */
+
 int mm_init(void)
 {
+    /* free list 시작점 초기화 */
+    free_listp = NULL;
+
     // 최초 비어있는 heap 생성
     if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
         return -1;
@@ -87,32 +119,273 @@ int mm_init(void)
     PUT(heap_listp + (3*WSIZE), PACK(0, 1)); // 에필로그 헤더
     heap_listp += (2 * WSIZE);
 
-    // 비어있는 heap을 CHUNKSIZE 만큼의 free 블록으로 확장한다.
+    // 초기 free block 생성: 비어있는 heap을 CHUNKSIZE 만큼의 free 블록으로 확장한다.
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
+
+#if DEBUG_LEVEL
+    mm_checkheap(DEBUG_LEVEL - 1);
+#endif
     
     return 0;
 }
 
-//  mm_malloc - implicit free list에서 요청 크기에 맞는 블록을 할당
+#if DEBUG_LEVEL
+// 주어진 포인터가 현재 힙 범위 내부를 가리키는지 검사한다.
+static int in_heap(const void *p)
+{
+    return p >= mem_heap_lo() && p <= mem_heap_hi();
+}
+
+// payload 주소가 ALIGNMENT 단위로 정렬되어 있는지 검사한다.
+static int aligned(const void *p)
+{
+    return ((size_t)p % ALIGNMENT) == 0;
+}
+
+// 디버깅용: 현재 블록의 헤더/푸터 정보를 사람이 읽기 쉽게 출력한다.
+static void print_block(void *bp)
+{
+    size_t hsize = GET_SIZE(HDRP(bp));
+    size_t halloc = GET_ALLOC(HDRP(bp));
+    size_t fsize = GET_SIZE(FTRP(bp));
+    size_t falloc = GET_ALLOC(FTRP(bp));
+
+    printf("%p: header[%zu:%c] footer[%zu:%c]\n",
+           bp,
+           hsize,
+           halloc ? 'a' : 'f',
+           fsize,
+           falloc ? 'a' : 'f');
+}
+
+/*
+ * mm_checkheap - 현재 explicit free list 기반 힙 구조가 올바른지 검사한다.
+ *
+ * 공통 힙 검사와 explicit free list 전용 검사를 함께 수행한다.
+ * DEBUG_LEVEL이 0이면 이 함수 전체가 컴파일되지 않는다.
+ */
+static void mm_checkheap(int verbose)
+{
+    void *bp;
+    void *fp;
+    void *slow;
+    void *fast;
+    int prev_free = 0;
+    size_t heap_free_blocks = 0;
+    size_t list_free_blocks = 0;
+
+    if (verbose)
+        printf("Heap (%p):\n", heap_listp);
+
+    // 프롤로그 블록은 크기 DSIZE의 할당 블록이어야 한다.
+    if (GET_SIZE(HDRP(heap_listp)) != DSIZE || !GET_ALLOC(HDRP(heap_listp))) {
+        printf("Error: bad prologue header\n");
+        return;
+    }
+
+    if (GET_SIZE(FTRP(heap_listp)) != DSIZE || !GET_ALLOC(FTRP(heap_listp))) {
+        printf("Error: bad prologue footer\n");
+        return;
+    }
+    /* =========================
+     * 1. 힙 전체 순회 검사
+     * ========================= */
+
+    // 힙 전체를 순회하며 블록 단위의 불변식을 검사한다.
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        size_t hsize = GET_SIZE(HDRP(bp));
+        size_t halloc = GET_ALLOC(HDRP(bp));
+
+        if (verbose)
+            print_block(bp);
+
+        // 모든 payload는 정렬되어 있어야 한다.
+        if (!aligned(bp))
+            printf("Error: %p is not doubleword aligned\n", bp);
+
+        // 헤더와 푸터는 모두 힙 범위 내부에 있어야 한다.
+        if (!in_heap(HDRP(bp)) || !in_heap(FTRP(bp)))
+            printf("Error: %p header/footer out of heap range\n", bp);
+
+        // 헤더와 푸터의 size/alloc 정보는 항상 일치해야 한다.
+        if (GET(HDRP(bp)) != GET(FTRP(bp)))
+            printf("Error: header does not match footer at %p\n", bp);
+
+        // 블록 크기는 정렬 단위의 배수여야 한다.
+        if (hsize % ALIGNMENT)
+            printf("Error: block size is not aligned at %p\n", bp);
+
+        // 프롤로그 블록을 제외한 일반 블록은 최소 블록 크기 이상이어야 한다.
+        if (bp != heap_listp && hsize < MINBLOCKSIZE)
+            printf("Error: block too small at %p\n", bp);
+
+        // 인접한 free block이 연속으로 있으면 coalescing이 제대로 안 된 것이다.
+        if (!halloc) {
+            heap_free_blocks++;
+            if (prev_free)
+                printf("Error: two consecutive free blocks at %p\n", bp);
+            prev_free = 1;
+        } else {
+            prev_free = 0;
+        }
+    }
+
+    /* 에필로그 헤더 검사 */
+    if (GET_SIZE(HDRP(bp)) != 0 || !GET_ALLOC(HDRP(bp)))
+        printf("Error: bad epilogue header\n");
+    
+    /* =========================
+    * 2. explicit free list 전용 검사
+    * ========================= */
+
+    /* free_listp 자체가 힙 안에 있는지 확인 */
+    if (free_listp != NULL && !in_heap(free_listp))
+        printf("Error: free_listp points outside heap\n");
+    
+    /*
+    * free list cycle 검사
+    * Floyd tortoise-hare 알고리즘 사용
+    */
+    slow = free_listp;
+    fast = free_listp;
+
+    while (fast != NULL && NEXT_FREEP(fast) != NULL) {
+        slow = NEXT_FREEP(slow);
+        fast = NEXT_FREEP(NEXT_FREEP(fast));
+
+        if (slow == fast) {
+            printf("Error: cycle detected in free list\n");
+            break;
+        }
+    }
+
+    /*
+     * free list를 순회하면서:
+     * 1. 모든 노드가 실제 free block인지
+     * 2. prev/next 연결이 일관적인지
+     * 3. 포인터가 힙 범위 내부인지
+     * 를 검사한다.
+     */
+
+    for (fp = free_listp; fp != NULL; fp = NEXT_FREEP(fp)) {
+        list_free_blocks++;
+
+        /* free list 노드는 힙 내부를 가리켜야 한다 */
+        if (!in_heap(fp))
+            printf("Error: free list node %p is outside heap\n", fp);
+
+        /* free list 안의 블록은 반드시 free 상태여야 한다 */
+        if (GET_ALLOC(HDRP(fp)))
+            printf("Error: allocated block %p found in free list\n", fp);
+
+        /* free list 노드도 정렬되어 있어야 한다 */
+        if (!aligned(fp))
+            printf("Error: free list node %p is not aligned\n", fp);
+
+        /* prev 포인터가 힙 밖을 가리키면 안 된다 */
+        if (PREV_FREEP(fp) != NULL && !in_heap(PREV_FREEP(fp)))
+            printf("Error: prev pointer of %p points outside heap\n", fp);
+
+        /* next 포인터가 힙 밖을 가리키면 안 된다 */
+        if (NEXT_FREEP(fp) != NULL && !in_heap(NEXT_FREEP(fp)))
+            printf("Error: next pointer of %p points outside heap\n", fp);
+
+        /* prev <-> next 연결의 일관성 검사 */
+        if (PREV_FREEP(fp) != NULL && NEXT_FREEP(PREV_FREEP(fp)) != fp)
+            printf("Error: inconsistent prev link at %p\n", fp);
+
+        if (NEXT_FREEP(fp) != NULL && PREV_FREEP(NEXT_FREEP(fp)) != fp)
+            printf("Error: inconsistent next link at %p\n", fp);
+    }
+
+    /*
+     * 힙 전체를 순회하며 센 free block 수와
+     * free list를 순회하며 센 노드 수는 같아야 한다.
+     */
+
+    if (heap_free_blocks != list_free_blocks) {
+        printf("Error: free block count mismatch (heap=%zu, list=%zu)\n",
+               heap_free_blocks, list_free_blocks);
+    }
+    
+    if (verbose) {
+        printf("Heap check complete: free blocks in heap = %zu, free blocks in list = %zu\n",
+               heap_free_blocks, list_free_blocks);
+    }
+}
+#endif
+
+
+/* =========================
+ * free list 삽입/삭제
+ * ========================= */
+
+ /*
+ * insert_free_block - free block을 free list 맨 앞에 삽입한다.
+ * 가장 단순한 LIFO 정책이다.
+ */
+
+ static void insert_free_block(void *bp)
+{
+    SET_PREV_FREEP(bp, NULL); // bp의 prev는 없음 (새 헤드가 될 것이기 때문)
+    SET_NEXT_FREEP(bp, free_listp); // bp의 next는 기존 head
+
+    if (free_listp != NULL) // 만약 free 블록 list 가 비어있지 않는다면 
+        SET_PREV_FREEP(free_listp, bp); // 현재 free list의 head 블록의 prev 포인터를 bp로 설정한다
+
+    free_listp = bp; // head를 bp로 갱신
+}
+
+/*
+ * remove_free_block - free list에서 bp를 제거한다.
+ * bp의 이전/다음 노드를 서로 다시 연결해 준다.
+ */
+static void remove_free_block(void *bp)
+{
+    void *prev = PREV_FREEP(bp);
+    void *next = NEXT_FREEP(bp);
+
+    if (prev != NULL)
+        SET_NEXT_FREEP(prev, next);
+    else
+        free_listp = next;
+
+    if (next != NULL)
+        SET_PREV_FREEP(next, prev);
+}
+
+/* =========================
+ * mm_malloc
+ * ========================= */
+
+ /*
+ * mm_malloc - explicit free list에서 요청 크기에 맞는 블록을 할당한다.
+ * free list만 순회해서 fit을 찾는다.
+ */
+
 void *mm_malloc(size_t size)
 {
-    size_t asize;      // 정렬과 헤더/푸터를 포함한 실제 할당 블록 크기
-    size_t extendsize; // 적절한 free block이 없을 때 힙을 얼마나 늘릴지
+    size_t asize;      /* 정렬/오버헤드를 포함한 실제 블록 크기 */
+    size_t extendsize; /* 힙 확장 크기 */
     char *bp;
 
     if (size == 0)             // 0바이트 요청은 할당하지 않음
         return NULL;
 
-    // 최소 블록 크기를 보장하면서 8바이트 정렬을 맞춘다.
-    if (size <= DSIZE) // size <= DSIZE 이면 최소 블록 크기 16바이트(헤더+푸터+최소 payload)로 맞춘다.
-        asize = 2 * DSIZE; 
-    else // 그보다 크면 헤더/푸터 오버헤드를 포함해서 DSIZE 배수로 올림한다.
-        asize = DSIZE * ((size + DSIZE + (DSIZE - 1)) / DSIZE);
+    /* header + footer를 포함하고 8바이트 정렬을 맞춘다 */
+    asize = ALIGN(size + 2 * WSIZE);
 
-    // first fit 방식으로 들어갈 수 있는 free block을 찾으면 place()로 해당 블록에 배치하고 주소를 반환한다.
+    /* explicit free list는 prev/next 포인터를 담을 최소 크기가 필요하다 */
+    if (asize < MINBLOCKSIZE)
+        asize = MINBLOCKSIZE;
+    
+    /* free list에서 적절한 블록 탐색 */
     if ((bp = find_fit(asize)) != NULL) {
         place(bp, asize);
+#if DEBUG_LEVEL
+        mm_checkheap(DEBUG_LEVEL - 1);
+#endif
         return bp;
     }
 
@@ -123,22 +396,43 @@ void *mm_malloc(size_t size)
 
     // 새로 확장한 free block에 요청 블록을 배치한 뒤 주소를 반환한다.
     place(bp, asize);
+
+#if DEBUG_LEVEL
+    mm_checkheap(DEBUG_LEVEL - 1);
+#endif
+
     return bp;
 }
+
+/* =========================
+ * place
+ * ========================= */
+
+ /*
+ * place - free block bp에 크기 asize의 할당 블록을 배치한다.
+ * 먼저 free list에서 제거하고,
+ * 남는 공간이 충분하면 split 후 남은 조각을 다시 free list에 넣는다.
+ */
 
 // place - free block bp에 크기 asize인 할당 블록을 배치. 남는 공간이 최소 블록 크기 이상이면 블록을 분할
 static void place(void *bp, size_t asize)
 {
     size_t csize = GET_SIZE(HDRP(bp)); // 현재 free block의 전체 크기
 
+    /* 이제 bp는 free block이 아니므로 free list에서 제거 */
+    remove_free_block(bp);
+
     // 현재 free block에서 요청 크기만큼 할당하고도 남는 공간이 최소 블록 크기(2 * DSIZE) 이상이면 분할한다.
-    if ((csize - asize) >= (2 * DSIZE)) {
+    if ((csize - asize) >= MINBLOCKSIZE) {
         PUT(HDRP(bp), PACK(asize, 1));           // 앞부분을 할당 블록의 헤더로 설정
         PUT(FTRP(bp), PACK(asize, 1));           // 앞부분을 할당 블록의 푸터로 설정
 
         bp = NEXT_BLKP(bp);                      // 남은 부분의 시작 블록으로 이동
         PUT(HDRP(bp), PACK(csize - asize, 0));  // 남은 부분을 free block 헤더로 설정
         PUT(FTRP(bp), PACK(csize - asize, 0));  // 남은 부분을 free block 푸터로 설정
+
+        /* 새 free block을 free list에 삽입 */
+        insert_free_block(bp);
     }
     else { // 남는 공간이 너무 작으면 분할하지 않고 현재 블록 전체를 그대로 할당 블록으로 사용한다.
         PUT(HDRP(bp), PACK(csize, 1));          // 전체 블록을 할당 상태로 표시
@@ -146,7 +440,15 @@ static void place(void *bp, size_t asize)
     }
 }
 
-// 새 가용 블록으로 heap 확장 함수
+/* =========================
+ * extend_heap
+ * ========================= */
+
+/*
+ * extend_heap - 힙을 확장해 새 free block을 만든다.
+ * 만들어진 free block은 coalesce를 거치면서 free list에 삽입된다.
+ */
+
 static void *extend_heap(size_t words)
 {
     char *bp;
@@ -163,23 +465,44 @@ static void *extend_heap(size_t words)
     return coalesce(bp);
 }
 
+/* =========================
+ * mm_free
+ * ========================= */
+
 /*
- * mm_free - 블록 해제 시 병합 함수 호출
+ * mm_free - 블록을 free 상태로 만들고 인접 free block과 병합한다.
+ * 병합 후 최종 free block만 free list에 들어가게 된다.
  */
+
 void mm_free(void *bp)
 {
-    if (bp == NULL) {
+    if (bp == NULL)
         return;
-    }
 
     size_t size = GET_SIZE(HDRP(bp));
 
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
+
     coalesce(bp);
+
+#if DEBUG_LEVEL
+    mm_checkheap(DEBUG_LEVEL - 1);
+#endif
 }
 
-// free 블록 병합 함수
+/* =========================
+ * coalesce
+ * ========================= */
+
+/*
+ * coalesce - 현재 free block bp를 이웃 free block과 병합한다.
+ *
+ * explicit free list에서는 병합 대상이 되는 이웃 free block들을
+ * 먼저 free list에서 제거한 뒤,
+ * 병합이 끝난 최종 블록 하나만 다시 free list에 삽입해야 한다.
+ */
+
 static void *coalesce(void *bp)
 {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록이 할당되어 있는가
@@ -187,35 +510,58 @@ static void *coalesce(void *bp)
     size_t size = GET_SIZE(HDRP(bp)); // 현재 블록 크기
 
     if (prev_alloc && next_alloc) { // 양옆 모두 사용 중
+        insert_free_block(bp); /* 현재 블록만 free list에 넣는다 */
         return bp;
     } else if (prev_alloc && !next_alloc) { // 다음 블록과 병합
+
+        remove_free_block(NEXT_BLKP(bp));
+
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
     } else if (!prev_alloc && next_alloc) { // 이전 블록과 병합
+
+        remove_free_block(PREV_BLKP(bp));
+
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     } else { // 양옆 모두 free이므로 모두 병합
+
+        remove_free_block(PREV_BLKP(bp));
+        remove_free_block(NEXT_BLKP(bp));
+
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
 
+    insert_free_block(bp); /* 병합이 끝난 최종 free block을 free list에 다시 삽입 */
+
     return bp;
 }
+
+/* =========================
+ * find_fit
+ * ========================= */
+
+ /*
+ * find_fit - free list만 순회하면서 first fit을 찾는다.
+ * implicit처럼 힙 전체를 순회하지 않는 것이 핵심 차이이다.
+ */
 
 // 요청한 크기 asize를 담을 수 있는 free block을 힙에서 찾는 함수
 static void *find_fit(size_t asize)
 {
     void *bp; // 현재 보고 있는 블록의 payload 시작 주소
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+    for (bp = free_listp; bp != NULL; bp = NEXT_FREEP(bp)) {
+        if (asize <= GET_SIZE(HDRP(bp)))
             return bp;
     }
+
     return NULL;
 }
 
