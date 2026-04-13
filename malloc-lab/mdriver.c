@@ -141,6 +141,7 @@ static void malloc_error(int tracenum, int opnum, char *msg);
 static void app_error(char *msg);
 static int should_log_growth(trace_t *trace);
 static const char *op_name(int type);
+static void dump_live_block_distribution(trace_t *trace, int opnum);
 
 /**************
  * 메인 루틴
@@ -631,6 +632,49 @@ static const char *op_name(int type)
 	}
 }
 
+static void dump_live_block_distribution(trace_t *trace, int opnum)
+{
+	int i;
+	int live_count = 0;
+	int count16 = 0, count64 = 0, count112 = 0, count128 = 0, count448 = 0, count512 = 0;
+	size_t live_bytes = 0;
+
+	for (i = 0; i < trace->num_ids; i++)
+	{
+		size_t sz = trace->block_sizes[i];
+		if (trace->blocks[i] == NULL || sz == 0)
+			continue;
+
+		live_count++;
+		live_bytes += sz;
+
+		if (sz == 16)
+			count16++;
+		else if (sz == 64)
+			count64++;
+		else if (sz == 112)
+			count112++;
+		else if (sz == 128)
+			count128++;
+		else if (sz == 448)
+			count448++;
+		else if (sz == 512)
+			count512++;
+	}
+
+	printf("[live-dist] trace=%s op=%d live_blocks=%d live_bytes=%zu sizes{16=%d,64=%d,112=%d,128=%d,448=%d,512=%d}\n",
+		   trace->filename,
+		   opnum,
+		   live_count,
+		   live_bytes,
+		   count16,
+		   count64,
+		   count112,
+		   count128,
+		   count448,
+		   count512);
+}
+
 /**********************************************************************
  * 아래 함수들은 libc와 mm malloc 패키지의 정합성, 공간 활용도,
  * 처리량을 평가한다.
@@ -780,6 +824,8 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 	mem_reset_brk();
 	if (mm_init() < 0)
 		app_error("mm_init failed in eval_mm_util");
+	memset(trace->blocks, 0, trace->num_ids * sizeof(char *));
+	memset(trace->block_sizes, 0, trace->num_ids * sizeof(size_t));
 
 	for (i = 0; i < trace->num_ops; i++)
 	{
@@ -831,6 +877,8 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 			p = trace->blocks[index];
 
 			mm_free(p);
+			trace->blocks[index] = NULL;
+			trace->block_sizes[index] = 0;
 
 			/* 현재 할당된 모든 블록의 총 크기 추적 */
 			total_size -= size;
@@ -842,6 +890,18 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 		}
 
 		heap_after = mem_heapsize();
+
+		if (!strcmp(trace->filename, "binary-bal.rep") && i == 5999)
+		{
+			dump_live_block_distribution(trace, i);
+			mm_dump_free_stats("binary-bal before phase-2");
+		}
+		if (!strcmp(trace->filename, "binary2-bal.rep") && i == 12014)
+		{
+			dump_live_block_distribution(trace, i);
+			mm_dump_free_stats("binary2-bal before phase-2");
+		}
+
 		if (should_log_growth(trace) && heap_after > heap_before)
 		{
 			int req_size = 0;

@@ -138,6 +138,37 @@
 - 해석:
   - 내부 단편화는 다소 개선될 여지가 있지만, 현재 낮은 util trace의 주원인은 아님
 
+### 10. 제한적 class-local 공급
+
+- 시도:
+  - small/medium class에 한해
+  - 같은 class 요청이 짧게 반복될 때만
+  - 일반 `find_fit()` 실패 후 private seed block 하나를 잠깐 유지하는 fallback 공급 경로 추가
+- 목적:
+  - 작은 블록과 중간 블록이 같은 freshly-extended 영역에서 교차 배치되는 것을 줄이기
+  - 과적합 위험을 낮추기 위해 전용 arena가 아니라 단일 seed만 사용
+- 결과:
+  - correctness 통과
+  - 점수는 여전히 `85`
+- 해석:
+  - weak한 class-local 공급만으로는 `binary/binary2`의 연속 free 공간 부족을 해결하지 못했다
+  - `free`/`realloc` 시 seed를 곧바로 해제하는 보수적 정책 때문에 분리 효과가 충분히 누적되지 않았다
+
+### 11. tiny class 전용 hidden seed
+
+- 시도:
+  - `<= 64` tiny allocation에 대해 hidden seed block 하나를 두고 우선 소비
+  - fit 실패 시 tiny 전용 seed를 새로 만들고, medium 이상 요청은 기존 segregated allocator 경로 유지
+- 목적:
+  - tiny block이 medium hole을 계속 갉아먹는 패턴을 줄이기
+  - tiny allocation만 별도로 완충해서 `binary/binary2`의 교차 배치를 완화하기
+- 결과:
+  - correctness 통과
+  - 점수는 여전히 `85`
+- 해석:
+  - tiny class만 분리하는 수준으로는 `binary/binary2`의 연속 free 공간 부족을 해소하지 못했다
+  - hidden seed를 `free`/`realloc` 직전에 일반 free block으로 되돌리는 구조 때문에, 물리적 분리 효과가 충분히 유지되지 않았다
+
 ## Trace 분석 결과
 
 ### 점수를 깎는 주요 trace
@@ -146,6 +177,53 @@
 - `binary2-bal.rep`
 - `realloc-bal.rep`
 - `realloc2-bal.rep`
+
+### 계측 기반 live 블록 분포
+
+`mdriver.c`에 계측 로그를 추가해 `binary/binary2`의 2단계 진입 시점에 살아 있는 블록 분포를 확인했다.
+
+관측값:
+
+```text
+[live-dist] trace=binary-bal.rep op=6000
+live_blocks=2001 live_bytes=128512
+sizes{16=0,64=2000,112=0,128=0,448=0,512=1}
+
+[live-dist] trace=binary2-bal.rep op=12015
+live_blocks=4016 live_bytes=66048
+sizes{16=4000,64=0,112=0,128=16,448=0,512=0}
+```
+
+해석:
+
+- `binary-bal`의 2단계 진입 시점에는 사실상 `64` 바이트급 live block `2000`개가 남아 있다.
+- `binary2-bal`의 2단계 진입 시점에는 사실상 `16` 바이트급 live block `4000`개가 남아 있다.
+- 즉, 문제는 free 총량 부족이 아니라 작은 live block들이 중간에 끼어 있어 free hole들이 서로 연결되지 못한다는 점이다.
+- 따라서 현재 병목은 `free bytes` 부족이 아니라 `contiguous free bytes` 부족이다.
+
+### 계측 기반 free 블록 분포
+
+live 분포만으로는 부족해서, 같은 시점의 free list 분포도 함께 계측했다.
+
+관측값:
+
+```text
+[free-dist] binary-bal before phase-2 total_blocks=2000 total_bytes=916864 largest=4296 sizes{120=0,136=0,456=1935,520=0} ge{136=2000,520=1}
+[free-dist] binary2-bal before phase-2 total_blocks=3989 total_bytes=479912 largest=1352 sizes{120=3988,136=0,456=0,520=0} ge{136=1,520=1}
+```
+
+해석:
+
+- `binary-bal`
+  - free block 대부분이 `456` 크기다.
+  - 이는 `448` 요청의 실제 블록 크기와 대응한다.
+  - 다음 단계 요청인 `512`의 실제 필요 크기는 `520` 수준이므로, 거의 모든 free block이 “조금 부족한 크기”다.
+- `binary2-bal`
+  - free block 대부분이 `120` 크기다.
+  - 이는 `112` 요청의 실제 블록 크기와 대응한다.
+  - 다음 단계 요청인 `128`의 실제 필요 크기는 `136` 수준이므로, 여기서도 거의 모든 free block이 “조금 부족한 크기”다.
+- 두 trace 모두 `largest`가 1개 정도 존재하지만, 그건 힙 끝의 잔여 free block일 뿐이고 반복 요청 전체를 감당할 수 없다.
+- 즉 문제는 단순한 free 총량 부족이 아니라, 살아 있는 작은 블록 때문에 free block이 다음 요청보다 조금 작은 크기로 대량 분절되어 있다는 점이다.
 
 ### `binary-bal.rep` 패턴
 
@@ -186,6 +264,12 @@
 
 핵심 병목은 `binary/binary2`가 의도적으로 만드는 구조적 외부 단편화다.
 
+보다 정확히 말하면:
+
+- `binary-bal`은 `456` 크기 free block이 대량으로 남지만 다음 단계는 `520`이 필요하다.
+- `binary2-bal`은 `120` 크기 free block이 대량으로 남지만 다음 단계는 `136`이 필요하다.
+- 따라서 현재 allocator는 “거의 맞는 크기”의 free block을 많이 가지고도, 연속성 부족 때문에 heap growth를 반복하게 된다.
+
 ## 현재 구현 상태
 
 현재 `segregated-prev-alloc` 브랜치의 핵심 방향은 아래와 같다.
@@ -195,6 +279,61 @@
 - bounded best fit 성향 탐색
 - `realloc` 제자리 확장
 - `prev_alloc` 기반 footerless allocated block
+
+## free 연속성 부족 대응 방안
+
+현재 계측 결과 기준으로, `binary/binary2`의 핵심 문제는 작은 live block이 큰 free hole 사이에 교차 배치되어 병합을 물리적으로 막는 점이다. 다음 실험은 이 연속성 부족을 줄이는 방향이어야 한다.
+
+### 1. class-local placement를 더 강하게 분리
+
+- 목표:
+  - 작은 블록과 중간/큰 블록이 같은 freshly-extended 영역에서 번갈아 잘리지 않게 한다.
+- 방법:
+  - 특정 small/medium class에 대해 같은 class 요청이 연속으로 올 때 같은 공급 영역에서 우선 소비하게 한다.
+  - 단순 free list 분리만이 아니라, 물리적 배치도 class 중심으로 묶는 방향을 검토한다.
+- 주의:
+  - trace 전용 하드코딩이 아니라, `small/medium repeated allocation`에 일반적으로 대응하는 형태여야 한다.
+
+### 2. class 전용 공급 전략 도입
+
+- 목표:
+  - `extend_heap()`로 확보한 큰 free block이 여러 크기의 요청에 의해 교차 소비되는 것을 줄인다.
+- 방법:
+  - 일부 class에 대해서는 generic free block 하나로 두지 말고, 같은 크기 블록 여러 개로 carve하여 공급한다.
+  - 특히 작은 블록 class가 중간/큰 블록용 공간을 잠식하지 않게 한다.
+- 주의:
+  - 즉시 병합 정책과 충돌하지 않도록 적용 범위를 제한해야 한다.
+
+### 3. physical placement 관점의 계측 유지
+
+- 목표:
+  - 정책 조정보다 실제 배치가 어떻게 일어나는지를 먼저 확인한다.
+- 방법:
+  - `binary/binary2`의 2단계 직전과 직후에 live block 분포, heap growth 시점, free list 분포를 계속 관찰한다.
+- 이유:
+  - 지금까지의 결과상 class 개수, 탐색 깊이, split 기준 조정은 거의 효과가 없었다.
+  - 따라서 다음 실험은 반드시 “어디에 배치되는가”를 기준으로 평가해야 한다.
+
+### 4. 메타데이터 최적화와 연속성 문제를 분리해서 본다
+
+- `prev_alloc`과 allocated footer 제거는 메타데이터 오버헤드를 줄이는 방향이다.
+- 하지만 `binary/binary2`의 util 정체는 주로 외부 단편화, 그중에서도 연속 free 공간 부족이 원인이다.
+- 따라서 메타데이터 최적화는 유지할 가치가 있어도, 연속성 부족 문제의 직접 해법은 아니다.
+
+### 5. 다음 구조 실험: tiny class 전용 slab 공급
+
+- 목표:
+  - `16`, `24`, `32`, `48`, `64` 같은 tiny class를 일반 segregated free list와 물리적으로 덜 섞이게 한다.
+- 방향:
+  - tiny class에 대해 exact-size block을 반복 공급하는 작은 slab 경로를 별도로 둔다.
+  - medium 이상 블록은 기존 segregated allocator 경로를 그대로 유지한다.
+- 기대 효과:
+  - `binary/binary2`에서 살아 있는 tiny block이 medium hole 사이에 끼어드는 빈도를 줄일 수 있다.
+- 리스크:
+  - tiny class용 별도 공급 구조가 일반 workload에서 hidden fragmentation을 만들 수 있다.
+  - 따라서 적용 범위는 `<= 64` 정도의 tiny class로 제한하고, 계측으로 `random/random2` 영향도 함께 확인해야 한다.
+
+현재까지의 결과를 보면, tiny class를 숨겨서 공급하는 정도로는 충분하지 않았다. 다음 실험은 hidden seed가 아니라 더 명시적인 tiny slab 또는 free list 분포 계측 강화 쪽이 타당하다.
 
 ## 현재 결론
 

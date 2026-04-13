@@ -172,6 +172,56 @@ static void set_next_prev_alloc(void *bp, size_t prev_alloc)
     PUT(next_hdr, next_word);
 }
 
+void mm_dump_free_stats(const char *tag)
+{
+    int total_blocks = 0;
+    size_t total_bytes = 0;
+    size_t largest = 0;
+    int count_120 = 0;
+    int count_136 = 0;
+    int count_456 = 0;
+    int count_520 = 0;
+    int ge_136 = 0;
+    int ge_520 = 0;
+
+    for (int i = 0; i < LISTLIMIT; i++) {
+        void *bp;
+
+        for (bp = seg_free_lists[i]; bp != NULL; bp = NEXT_FREEP(bp)) {
+            size_t size = GET_SIZE(HDRP(bp));
+
+            total_blocks++;
+            total_bytes += size;
+            if (size > largest)
+                largest = size;
+            if (size == 120)
+                count_120++;
+            if (size == 136)
+                count_136++;
+            if (size == 456)
+                count_456++;
+            if (size == 520)
+                count_520++;
+            if (size >= 136)
+                ge_136++;
+            if (size >= 520)
+                ge_520++;
+        }
+    }
+
+    printf("[free-dist] %s total_blocks=%d total_bytes=%zu largest=%zu sizes{120=%d,136=%d,456=%d,520=%d} ge{136=%d,520=%d}\n",
+           tag,
+           total_blocks,
+           total_bytes,
+           largest,
+           count_120,
+           count_136,
+           count_456,
+           count_520,
+           ge_136,
+           ge_520);
+}
+
 #if DEBUG_LEVEL
 // 주어진 포인터가 현재 힙 범위 내부를 가리키는지 검사한다.
 static int in_heap(const void *p)
