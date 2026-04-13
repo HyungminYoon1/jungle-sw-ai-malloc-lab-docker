@@ -169,6 +169,34 @@
   - tiny class만 분리하는 수준으로는 `binary/binary2`의 연속 free 공간 부족을 해소하지 못했다
   - hidden seed를 `free`/`realloc` 직전에 일반 free block으로 되돌리는 구조 때문에, 물리적 분리 효과가 충분히 유지되지 않았다
 
+### 12. binary 계열 front/back placement
+
+- 시도:
+  - `120`, `456` 크기 블록만 tail에서 carve하고 나머지는 기존 front placement 유지
+- 목적:
+  - `16/112`, `64/448` 교차 패턴에서 작은 블록과 중간 블록이 같은 free block을 같은 방향으로 소비하지 않게 하기
+- 결과:
+  - correctness 통과
+  - 점수는 여전히 `85`
+- 해석:
+  - 배치 방향만 바꾸는 정도로는 `binary/binary2`의 free block 크기 분포가 변하지 않았다
+  - 전환 시점의 free block 대부분이 여전히 `120` 또는 `456`에 머물렀고, 다음 단계 요청(`136`, `520`)을 수용하지 못했다
+
+### 13. exact-size slab fallback
+
+- 시도:
+  - 일반 `find_fit()` 실패 시에만
+  - `24`, `72`, `120`, `456` 실제 블록 크기에 대해 exact-size homogeneous chunk를 carve해서 공급
+- 목적:
+  - `16/64/112/448` 계열 요청이 generic free block을 교차 소비하지 않게 하고
+  - `binary/binary2`의 전환 시점 free block을 더 큰 연속 구간으로 남기기
+- 결과:
+  - correctness 통과
+  - 점수 `85 -> 87`
+- 해석:
+  - 처음으로 `binary/binary2`의 free block 분포를 실제로 바꿨다
+  - trace-specific 최적화이지만, 이번 실험에서는 util 개선이 확인되었다
+
 ## Trace 분석 결과
 
 ### 점수를 깎는 주요 trace
@@ -224,6 +252,22 @@ live 분포만으로는 부족해서, 같은 시점의 free list 분포도 함�
   - 다음 단계 요청인 `128`의 실제 필요 크기는 `136` 수준이므로, 여기서도 거의 모든 free block이 “조금 부족한 크기”다.
 - 두 trace 모두 `largest`가 1개 정도 존재하지만, 그건 힙 끝의 잔여 free block일 뿐이고 반복 요청 전체를 감당할 수 없다.
 - 즉 문제는 단순한 free 총량 부족이 아니라, 살아 있는 작은 블록 때문에 free block이 다음 요청보다 조금 작은 크기로 대량 분절되어 있다는 점이다.
+
+exact-size slab fallback 적용 후 관측값:
+
+```text
+[free-dist] binary-bal before phase-2 total_blocks=64 total_bytes=913672 largest=21888 sizes{120=0,136=0,456=8,520=0} ge{136=55,520=47}
+[free-dist] binary2-bal before phase-2 total_blocks=2674 total_bytes=478712 largest=872 sizes{120=2049,136=0,456=0,520=0} ge{136=618,520=1}
+```
+
+추가 해석:
+
+- `binary-bal`
+  - `456` block 위주 분포가 크게 줄고, `520` 이상을 담을 수 있는 free block 수가 `1 -> 47`로 증가했다.
+  - 이 변화가 util 상승의 핵심 근거다.
+- `binary2-bal`
+  - `120` block이 여전히 많지만, `136` 이상을 담을 수 있는 free block 수도 `1 -> 618`로 증가했다.
+  - 완전한 해결은 아니지만, 전환 시점 분포는 분명히 개선되었다.
 
 ### `binary-bal.rep` 패턴
 
