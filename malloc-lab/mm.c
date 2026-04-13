@@ -80,12 +80,16 @@ team_t team = {
 /* 64비트 환경에서 prev/next 포인터 2개를 담을 수 있는 최소 free block 크기 */
 #define MINBLOCKSIZE (2 * DSIZE + 2 * sizeof(void *)) // 지금 컨테이너/Ubuntu 환경에서는 24가 나옴
 
-/* free list의 head */
-static void *free_listp = NULL;
+// segregated free lists 에서 free list 사이즈 클래스의 개수 - seg_free_lists[0] 부터 seg_free_lists[15] 까지 할당
+#define LISTLIMIT 16
+
+/*segregated free list: 블록 크기를 보고 알맞은 리스트 인덱스를 구한 뒤 그 리스트 head에 삽입*/
+static void *seg_free_lists[LISTLIMIT]; 
 
 /* free list 조작 함수 */
 static void insert_free_block(void *bp);
 static void remove_free_block(void *bp);
+static int get_list_index(size_t size); // size class를 결정하는 함수 - 예) size <= 32면 0번 리스트, size <= 64면 1번 리스트
 
 static char *heap_listp = NULL;
 
@@ -93,6 +97,7 @@ static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
+
 #if DEBUG_LEVEL
 static int in_heap(const void *p);
 static int aligned(const void *p);
@@ -107,7 +112,9 @@ static void mm_checkheap(int verbose);
 int mm_init(void)
 {
     /* free list 시작점 초기화 */
-    free_listp = NULL;
+    for (int i = 0; i <=15; i++) {
+        seg_free_lists[i] = NULL; // 초기화
+    }
 
     // 최초 비어있는 heap 생성
     if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
@@ -160,9 +167,9 @@ static void print_block(void *bp)
 }
 
 /*
- * mm_checkheap - 현재 explicit free list 기반 힙 구조가 올바른지 검사한다.
+ * mm_checkheap - segregated free list 기반 힙 구조가 올바른지 검사한다.
  *
- * 공통 힙 검사와 explicit free list 전용 검사를 함께 수행한다.
+ * 공통 힙 검사와 segregated free list 전용 검사를 함께 수행한다.
  * DEBUG_LEVEL이 0이면 이 함수 전체가 컴파일되지 않는다.
  */
 static void mm_checkheap(int verbose)
@@ -175,10 +182,11 @@ static void mm_checkheap(int verbose)
     size_t heap_free_blocks = 0;
     size_t list_free_blocks = 0;
 
+    // verbose 모드일 때만 현재 힙 시작 주소를 출력(디버깅 출력을 켰을 때만 출력)
     if (verbose)
         printf("Heap (%p):\n", heap_listp);
 
-    // 프롤로그 블록은 크기 DSIZE의 할당 블록이어야 한다.
+    // 프롤로그 블록(힙 맨 앞에 인위적으로 넣는 작은 가짜 할당 블록)은 크기 DSIZE의 할당 블록이어야 한다.
     if (GET_SIZE(HDRP(heap_listp)) != DSIZE || !GET_ALLOC(HDRP(heap_listp))) {
         printf("Error: bad prologue header\n");
         return;
@@ -236,67 +244,96 @@ static void mm_checkheap(int verbose)
         printf("Error: bad epilogue header\n");
     
     /* =========================
-    * 2. explicit free list 전용 검사
-    * ========================= */
-
-    /* free_listp 자체가 힙 안에 있는지 확인 */
-    if (free_listp != NULL && !in_heap(free_listp))
-        printf("Error: free_listp points outside heap\n");
+     * 2. segregated free list 전용 검사
+     * ========================= */
     
-    /*
-    * free list cycle 검사
-    * Floyd tortoise-hare 알고리즘 사용
-    */
-    slow = free_listp;
-    fast = free_listp;
+    for (int i = 0; i < LISTLIMIT; i++) {
 
-    while (fast != NULL && NEXT_FREEP(fast) != NULL) {
-        slow = NEXT_FREEP(slow);
-        fast = NEXT_FREEP(NEXT_FREEP(fast));
-
-        if (slow == fast) {
-            printf("Error: cycle detected in free list\n");
-            break;
+        if (seg_free_lists[i] == NULL) {
+            continue;
         }
-    }
 
-    /*
-     * free list를 순회하면서:
-     * 1. 모든 노드가 실제 free block인지
-     * 2. prev/next 연결이 일관적인지
-     * 3. 포인터가 힙 범위 내부인지
-     * 를 검사한다.
-     */
+        /* seg_free_lists[i] 자체가 힙 안에 있는지 확인 */
+        if (seg_free_lists[i] != NULL && !in_heap(seg_free_lists[i])) {
+            printf("Error: seg_free_lists[%d] points outside heap\n", i);
+            continue;
+        }
+    
+        /*
+         * free list cycle 검사
+         * Floyd tortoise-hare 알고리즘 사용
+         */
+        slow = seg_free_lists[i];
+        fast = seg_free_lists[i];
+        
+        while (fast != NULL && NEXT_FREEP(fast) != NULL) {
+            slow = NEXT_FREEP(slow);
+            fast = NEXT_FREEP(NEXT_FREEP(fast));
 
-    for (fp = free_listp; fp != NULL; fp = NEXT_FREEP(fp)) {
-        list_free_blocks++;
+            if (slow == fast) {
+                printf("Error: cycle detected in free list\n");
+                break;
+            }
+        }
 
-        /* free list 노드는 힙 내부를 가리켜야 한다 */
-        if (!in_heap(fp))
-            printf("Error: free list node %p is outside heap\n", fp);
+        /*
+         * seg_free_lists[i]를 순회하면서:
+         * 1. 모든 노드가 실제 free block인지
+         * 2. prev/next 연결이 일관적인지
+         * 3. 포인터가 힙 범위 내부인지
+         * 를 검사한다.
+         */
 
-        /* free list 안의 블록은 반드시 free 상태여야 한다 */
-        if (GET_ALLOC(HDRP(fp)))
-            printf("Error: allocated block %p found in free list\n", fp);
+        for (fp = seg_free_lists[i]; fp != NULL; ) {
+            void *next;
 
-        /* free list 노드도 정렬되어 있어야 한다 */
-        if (!aligned(fp))
-            printf("Error: free list node %p is not aligned\n", fp);
+            /* fp가 유효한 포인터인지 먼저 확인
+             * free list 노드는 힙 내부를 가리켜야 한다 .
+             * 
+             */
+            if (!in_heap(fp)) {
+                printf("Error: free list node %p is outside heap\n", fp);
+                break;
+            }
+            
+            next = NEXT_FREEP(fp);
 
-        /* prev 포인터가 힙 밖을 가리키면 안 된다 */
-        if (PREV_FREEP(fp) != NULL && !in_heap(PREV_FREEP(fp)))
-            printf("Error: prev pointer of %p points outside heap\n", fp);
+            if (next != NULL && PREV_FREEP(next) != fp) {
+                printf("Error: next pointer of %p points outside heap\n", fp);
+                break;
+            }
 
-        /* next 포인터가 힙 밖을 가리키면 안 된다 */
-        if (NEXT_FREEP(fp) != NULL && !in_heap(NEXT_FREEP(fp)))
-            printf("Error: next pointer of %p points outside heap\n", fp);
+            list_free_blocks++;
 
-        /* prev <-> next 연결의 일관성 검사 */
-        if (PREV_FREEP(fp) != NULL && NEXT_FREEP(PREV_FREEP(fp)) != fp)
-            printf("Error: inconsistent prev link at %p\n", fp);
+            /* free list 안의 블록은 반드시 free 상태여야 한다 */
+            if (GET_ALLOC(HDRP(fp)))
+                printf("Error: allocated block %p found in free list\n", fp);
+            
+            /* free list 안의 블록은 올바른 size class에 들어 있어야 한다. */
+            if (get_list_index(GET_SIZE(HDRP(fp))) != i)
+                printf("Error: block %p is in wrong size class %d\n", fp, i);
 
-        if (NEXT_FREEP(fp) != NULL && PREV_FREEP(NEXT_FREEP(fp)) != fp)
-            printf("Error: inconsistent next link at %p\n", fp);
+            /* free list 노드도 정렬되어 있어야 한다 */
+            if (!aligned(fp))
+                printf("Error: free list node %p is not aligned\n", fp);
+
+            /* prev 포인터가 힙 밖을 가리키면 안 된다 */
+            if (PREV_FREEP(fp) != NULL && !in_heap(PREV_FREEP(fp)))
+                printf("Error: prev pointer of %p points outside heap\n", fp);
+
+            /* next 포인터가 힙 밖을 가리키면 안 된다 */
+            if (NEXT_FREEP(fp) != NULL && !in_heap(NEXT_FREEP(fp)))
+                printf("Error: next pointer of %p points outside heap\n", fp);
+
+            /* prev <-> next 연결의 일관성 검사 */
+            if (PREV_FREEP(fp) != NULL && NEXT_FREEP(PREV_FREEP(fp)) != fp)
+                printf("Error: inconsistent prev link at %p\n", fp);
+
+            if (NEXT_FREEP(fp) != NULL && PREV_FREEP(NEXT_FREEP(fp)) != fp)
+                printf("Error: inconsistent next link at %p\n", fp);
+            
+            fp = next; // 리스트의 다음 노드 검사
+        }
     }
 
     /*
@@ -326,15 +363,24 @@ static void mm_checkheap(int verbose)
  * 가장 단순한 LIFO 정책이다.
  */
 
- static void insert_free_block(void *bp)
+static void insert_free_block(void *bp)
 {
+    // 블록 크기 읽기
+    int size = GET_SIZE(HDRP(bp));
+    
+    // get_list_index(size) 호출하여 크기에 맞는 인덱스 탐색
+    int list_index = get_list_index(size);
+
+    // 해당 리스트의 head에 삽입
+    void *free_listp = seg_free_lists[list_index];
+
     SET_PREV_FREEP(bp, NULL); // bp의 prev는 없음 (새 헤드가 될 것이기 때문)
     SET_NEXT_FREEP(bp, free_listp); // bp의 next는 기존 head
 
     if (free_listp != NULL) // 만약 free 블록 list 가 비어있지 않는다면 
         SET_PREV_FREEP(free_listp, bp); // 현재 free list의 head 블록의 prev 포인터를 bp로 설정한다
 
-    free_listp = bp; // head를 bp로 갱신
+    seg_free_lists[list_index] = bp; // head를 bp로 갱신
 }
 
 /*
@@ -346,13 +392,62 @@ static void remove_free_block(void *bp)
     void *prev = PREV_FREEP(bp);
     void *next = NEXT_FREEP(bp);
 
+    /*
+     * bp가 리스트의 중간/끝에 있으면 이전 노드의 next를 갱신하고,
+     * bp가 head이면 해당 size class의 head를 next로 바꾼다.
+     */
     if (prev != NULL)
         SET_NEXT_FREEP(prev, next);
-    else
-        free_listp = next;
+    else {
+        /* 현재 블록의 크기로 어느 size class에 속하는지 계산한다. */
+        int index = get_list_index(GET_SIZE(HDRP(bp)));
+        seg_free_lists[index] = next;
+    }
 
+    /* 다음 노드가 있으면 그 노드의 prev를 bp의 이전 노드로 갱신한다. */
     if (next != NULL)
         SET_PREV_FREEP(next, prev);
+    
+    /* 제거된 블록의 링크는 끊는다 - 기능적으로는 꼭 필수는 아니지만, 디버깅과 안정성 면에서 유리 */
+    SET_PREV_FREEP(bp, NULL);
+    SET_NEXT_FREEP(bp, NULL);
+}
+
+static int get_list_index(size_t size)
+{
+    if (size <= 32) {
+        return 0;
+    } else if (size <= 64) {
+        return 1;
+    } else if (size <= 128) {
+        return 2;
+    } else if (size <= 256) {
+        return 3;
+    } else if (size <= 512) {
+        return 4;
+    } else if (size <= 1024) {
+        return 5;
+    } else if (size <= 2048) {
+        return 6;
+    } else if (size <= 4096) {
+        return 7;
+    } else if (size <= 8192) {
+        return 8;
+    } else if (size <= 16384) {
+        return 9;
+    } else if (size <= 32768) {
+        return 10;
+    } else if (size <= 65536) {
+        return 11;
+    } else if (size <= 131072) {
+        return 12;
+    } else if (size <= 262144) {
+        return 13;
+    } else if (size <= 524288) {
+        return 14;
+    } else {
+        return 15;
+    } 
 }
 
 /* =========================
@@ -411,7 +506,7 @@ void *mm_malloc(size_t size)
  /*
  * place - free block bp에 크기 asize의 할당 블록을 배치한다.
  * 먼저 free list에서 제거하고,
- * 남는 공간이 충분하면 split 후 남은 조각을 다시 free list에 넣는다.
+ * (공간이 충분할 경우) split 후 남은 조각을 새 크기에 맞는 size class에 다시 넣는다.
  */
 
 // place - free block bp에 크기 asize인 할당 블록을 배치. 남는 공간이 최소 블록 크기 이상이면 블록을 분할
@@ -496,11 +591,11 @@ void mm_free(void *bp)
  * ========================= */
 
 /*
- * coalesce - 현재 free block bp를 이웃 free block과 병합한다.
+ * coalesce - 현재 free block bp를 이웃 free block과 함께 free block 리스트에서 제거 -> 병합 -> 새 클래스에 삽입
  *
- * explicit free list에서는 병합 대상이 되는 이웃 free block들을
- * 먼저 free list에서 제거한 뒤,
- * 병합이 끝난 최종 블록 하나만 다시 free list에 삽입해야 한다.
+ * 병합 대상이 되는 이웃 free block들을 먼저 각각의 free list에서 제거한 뒤,
+ * 병합이 끝난 최종 블록 하나만 다시 해당 크기에 맞는 free list에 삽입해야 한다.
+ * 
  */
 
 static void *coalesce(void *bp)
@@ -508,39 +603,46 @@ static void *coalesce(void *bp)
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록이 할당되어 있는가
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); // 다음 블록이 할당되어 있는가
     size_t size = GET_SIZE(HDRP(bp)); // 현재 블록 크기
+    void *merged_bp; // 병합된 블록
 
     if (prev_alloc && next_alloc) { // 양옆 모두 사용 중
         insert_free_block(bp); /* 현재 블록만 free list에 넣는다 */
         return bp;
-    } else if (prev_alloc && !next_alloc) { // 다음 블록과 병합
+    } else if (prev_alloc && !next_alloc) { // 다음 블록이 free라 병합
 
-        remove_free_block(NEXT_BLKP(bp));
+        merged_bp = bp;
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp))); // 블록 사이즈 얻기
+        remove_free_block(NEXT_BLKP(bp)); // 연결 리스트에서 다음 블록 제거
+        
+        PUT(HDRP(merged_bp), PACK(size, 0)); // 헤더에 “이 블록 크기는 size이고 free다”라고 기록
+        PUT(FTRP(merged_bp), PACK(size, 0)); // 푸터에도 같은 정보를 기록
 
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size, 0));
-    } else if (!prev_alloc && next_alloc) { // 이전 블록과 병합
+    } else if (!prev_alloc && next_alloc) { // 이전 블록이 free라 병합
 
-        remove_free_block(PREV_BLKP(bp));
+        merged_bp = PREV_BLKP(bp);
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))); // 블록 사이즈 얻기
 
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        PUT(FTRP(bp), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
+        remove_free_block(PREV_BLKP(bp)); // 연결 리스트에서 이전 블록 제거
+
+        PUT(HDRP(merged_bp), PACK(size, 0));
+        PUT(FTRP(merged_bp), PACK(size, 0));
+
     } else { // 양옆 모두 free이므로 모두 병합
 
+        merged_bp = PREV_BLKP(bp);
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+
         remove_free_block(PREV_BLKP(bp));
         remove_free_block(NEXT_BLKP(bp));
 
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
+        PUT(HDRP(merged_bp), PACK(size, 0));
+        PUT(FTRP(merged_bp), PACK(size, 0));
+
     }
 
-    insert_free_block(bp); /* 병합이 끝난 최종 free block을 free list에 다시 삽입 */
+    insert_free_block(merged_bp); /* 병합이 끝난 최종 free block을 free list에 다시 삽입 */
 
-    return bp;
+    return merged_bp;
 }
 
 /* =========================
@@ -549,20 +651,25 @@ static void *coalesce(void *bp)
 
  /*
  * find_fit - free list만 순회하면서 first fit을 찾는다.
- * implicit처럼 힙 전체를 순회하지 않는 것이 핵심 차이이다.
+ * implicit처럼– 힙 전체를 순회하지 않는 것이 핵심 차이이다.
  */
 
 // 요청한 크기 asize를 담을 수 있는 free block을 힙에서 찾는 함수
 static void *find_fit(size_t asize)
 {
+    int index = get_list_index(asize); // asize에 맞는 시작 리스트 인덱스 찾기
     void *bp; // 현재 보고 있는 블록의 payload 시작 주소
 
-    for (bp = free_listp; bp != NULL; bp = NEXT_FREEP(bp)) {
-        if (asize <= GET_SIZE(HDRP(bp)))
-            return bp;
+    // 시작 인덱스부터 더 큰 리스트 방향으로 순회합니다.
+    for (int i = index; i < LISTLIMIT; i++) {
+        // 각 리스트의 head에서부터 해당 리스트를 순회합니다.
+        for (bp = seg_free_lists[i]; bp != NULL; bp = NEXT_FREEP(bp)) { // 해당 리스트에서 bp 가 존재할 경우
+            if (GET_SIZE(HDRP(bp)) >= asize) // 현재 free block이 asize 이상인지 검사
+                return bp; // first fit 정책 - 첫 번째 적합 블록 반환
+        }
     }
 
-    return NULL;
+    return NULL; // 끝까지 못 찾으면 NULL을 반환
 }
 
 void *mm_realloc(void *ptr, size_t size)
