@@ -66,6 +66,7 @@ typedef struct
 	int num_ids;		 /* alloc/realloc ID 개수 */
 	int num_ops;		 /* 서로 다른 요청 개수 */
 	int weight;			 /* 이 trace의 가중치(사용하지 않음) */
+	char *filename;      /* trace 파일 이름 */
 	traceop_t *ops;		 /* 요청 배열 */
 	char **blocks;		 /* malloc/realloc이 반환한 포인터 배열 */
 	size_t *block_sizes; /* 각 포인터에 대응하는 payload 크기 배열 */
@@ -138,6 +139,8 @@ static void usage(void);
 static void unix_error(char *msg);
 static void malloc_error(int tracenum, int opnum, char *msg);
 static void app_error(char *msg);
+static int should_log_growth(trace_t *trace);
+static const char *op_name(int type);
 
 /**************
  * 메인 루틴
@@ -521,6 +524,8 @@ static trace_t *read_trace(char *tracedir, char *filename)
 	/* trace 레코드 할당 */
 	if ((trace = (trace_t *)malloc(sizeof(trace_t))) == NULL)
 		unix_error("malloc 1 failed in read_trance");
+	if ((trace->filename = strdup(filename)) == NULL)
+		unix_error("strdup failed in read_trace");
 
 	/* trace 파일 헤더 읽기 */
 	strcpy(path, tracedir);
@@ -596,10 +601,34 @@ static trace_t *read_trace(char *tracedir, char *filename)
  */
 void free_trace(trace_t *trace)
 {
+	free(trace->filename);
 	free(trace->ops); /* 세 개의 배열을 해제 */
 	free(trace->blocks);
 	free(trace->block_sizes);
 	free(trace); /* 그리고 trace 레코드 자체도 해제 */
+}
+
+static int should_log_growth(trace_t *trace)
+{
+	return !strcmp(trace->filename, "binary-bal.rep") ||
+		   !strcmp(trace->filename, "binary2-bal.rep") ||
+		   !strcmp(trace->filename, "realloc-bal.rep") ||
+		   !strcmp(trace->filename, "realloc2-bal.rep");
+}
+
+static const char *op_name(int type)
+{
+	switch (type)
+	{
+	case ALLOC:
+		return "alloc";
+	case FREE:
+		return "free";
+	case REALLOC:
+		return "realloc";
+	default:
+		return "unknown";
+	}
 }
 
 /**********************************************************************
@@ -743,6 +772,7 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 	int size, newsize, oldsize;
 	int max_total_size = 0;
 	int total_size = 0;
+	int heap_before, heap_after;
 	char *p;
 	char *newp, *oldp;
 
@@ -753,6 +783,7 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 
 	for (i = 0; i < trace->num_ops; i++)
 	{
+		heap_before = mem_heapsize();
 		switch (trace->ops[i].type)
 		{
 
@@ -808,6 +839,27 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 
 		default:
 			app_error("Nonexistent request type in eval_mm_util");
+		}
+
+		heap_after = mem_heapsize();
+		if (should_log_growth(trace) && heap_after > heap_before)
+		{
+			int req_size = 0;
+			if (trace->ops[i].type == ALLOC || trace->ops[i].type == REALLOC)
+				req_size = trace->ops[i].size;
+
+			printf("[growth] trace=%s op=%d line=%d type=%s index=%d req=%d total=%d max=%d heap=%d->%d util_now=%.4f\n",
+				   trace->filename,
+				   i,
+				   LINENUM(i),
+				   op_name(trace->ops[i].type),
+				   trace->ops[i].index,
+				   req_size,
+				   total_size,
+				   max_total_size,
+				   heap_before,
+				   heap_after,
+				   heap_after ? ((double)total_size / (double)heap_after) : 0.0);
 		}
 	}
 
