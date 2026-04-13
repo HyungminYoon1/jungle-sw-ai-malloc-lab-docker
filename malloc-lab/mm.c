@@ -82,6 +82,8 @@ team_t team = {
 
 // segregated free lists 에서 free list 사이즈 클래스의 개수 - seg_free_lists[0] 부터 seg_free_lists[LISTLIMIT-1] 까지 할당
 #define LISTLIMIT 24
+// 각 size class에서 bounded best fit으로 확인할 최대 후보 수
+#define SEARCHLIMIT 10
 
 /*segregated free list: 블록 크기를 보고 알맞은 리스트 인덱스를 구한 뒤 그 리스트 head에 삽입*/
 static void *seg_free_lists[LISTLIMIT]; 
@@ -666,9 +668,10 @@ static void *coalesce(void *bp)
  * find_fit
  * ========================= */
 
- /*
- * find_fit - free list만 순회하면서 first fit을 찾는다.
- * implicit처럼– 힙 전체를 순회하지 않는 것이 핵심 차이이다.
+/*
+ * find_fit - segregated free list를 순회하며 bounded best fit을 찾는다.
+ * 각 size class에서 최대 SEARCHLIMIT개의 후보만 보고
+ * 가장 작은 적합 블록을 선택한다.
  */
 
 // 요청한 크기 asize를 담을 수 있는 free block을 힙에서 찾는 함수
@@ -679,11 +682,36 @@ static void *find_fit(size_t asize)
 
     // 시작 인덱스부터 더 큰 리스트 방향으로 순회합니다.
     for (int i = index; i < LISTLIMIT; i++) {
+        void *best_bp = NULL;      // 현재 class에서 가장 잘 맞는 후보 블록
+        size_t best_size = 0;      // best_bp의 크기
+        int examined = 0;          // 현재 class에서 확인한 적합 후보 수
+
         // 각 리스트의 head에서부터 해당 리스트를 순회합니다.
-        for (bp = seg_free_lists[i]; bp != NULL; bp = NEXT_FREEP(bp)) { // 해당 리스트에서 bp 가 존재할 경우
-            if (GET_SIZE(HDRP(bp)) >= asize) // 현재 free block이 asize 이상인지 검사
-                return bp; // first fit 정책 - 첫 번째 적합 블록 반환
+        for (bp = seg_free_lists[i]; bp != NULL; bp = NEXT_FREEP(bp)) {
+            size_t bsize = GET_SIZE(HDRP(bp));
+
+            // 요청 크기 이상인 블록만 후보가 된다.
+            if (bsize >= asize) {
+                if (best_bp == NULL || bsize < best_size) {
+                    best_bp = bp;
+                    best_size = bsize;
+                }
+
+                examined++;
+
+                // 완벽하게 같은 크기면 더 볼 필요가 없다.
+                if (bsize == asize)
+                    return bp;
+
+                // 각 class에서는 최대 SEARCHLIMIT개의 적합 후보까지만 본다.
+                if (examined >= SEARCHLIMIT)
+                    break;
+            }
         }
+
+        // 현재 class에서 적합 후보를 찾았다면 가장 잘 맞는 블록을 반환한다.
+        if (best_bp != NULL)
+            return best_bp;
     }
 
     return NULL; // 끝까지 못 찾으면 NULL을 반환
