@@ -363,8 +363,8 @@ static void mm_checkheap(int verbose)
  * ========================= */
 
  /*
- * insert_free_block - free block을 free list 맨 앞에 삽입한다.
- * 가장 단순한 LIFO 정책이다.
+ * insert_free_block - free block을 같은 size class 안에서 주소 순서로 삽입한다.
+ * LIFO보다 재사용 순서를 안정적으로 유지해 외부 단편화 완화를 기대한다.
  */
 
 static void insert_free_block(void *bp)
@@ -375,16 +375,25 @@ static void insert_free_block(void *bp)
     // get_list_index(size) 호출하여 크기에 맞는 인덱스 탐색
     int list_index = get_list_index(size);
 
-    // 해당 리스트의 head에 삽입
-    void *free_listp = seg_free_lists[list_index];
+    void *curr = seg_free_lists[list_index];
+    void *prev = NULL;
 
-    SET_PREV_FREEP(bp, NULL); // bp의 prev는 없음 (새 헤드가 될 것이기 때문)
-    SET_NEXT_FREEP(bp, free_listp); // bp의 next는 기존 head
+    // 같은 size class 안에서 주소 오름차순이 되도록 삽입 위치를 찾는다.
+    while (curr != NULL && curr < bp) {
+        prev = curr;
+        curr = NEXT_FREEP(curr);
+    }
 
-    if (free_listp != NULL) // 만약 free 블록 list 가 비어있지 않는다면 
-        SET_PREV_FREEP(free_listp, bp); // 현재 free list의 head 블록의 prev 포인터를 bp로 설정한다
+    SET_PREV_FREEP(bp, prev);
+    SET_NEXT_FREEP(bp, curr);
 
-    seg_free_lists[list_index] = bp; // head를 bp로 갱신
+    if (prev != NULL)
+        SET_NEXT_FREEP(prev, bp);
+    else
+        seg_free_lists[list_index] = bp;
+
+    if (curr != NULL)
+        SET_PREV_FREEP(curr, bp);
 }
 
 /*
