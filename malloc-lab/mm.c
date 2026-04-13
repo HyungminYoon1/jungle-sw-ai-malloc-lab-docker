@@ -80,8 +80,8 @@ team_t team = {
 /* 64비트 환경에서 prev/next 포인터 2개를 담을 수 있는 최소 free block 크기 */
 #define MINBLOCKSIZE (2 * DSIZE + 2 * sizeof(void *)) // 지금 컨테이너/Ubuntu 환경에서는 24가 나옴
 
-// segregated free lists 에서 free list 사이즈 클래스의 개수 - seg_free_lists[0] 부터 seg_free_lists[15] 까지 할당
-#define LISTLIMIT 16
+// segregated free lists 에서 free list 사이즈 클래스의 개수 - seg_free_lists[0] 부터 seg_free_lists[LISTLIMIT-1] 까지 할당
+#define LISTLIMIT 24
 
 /*segregated free list: 블록 크기를 보고 알맞은 리스트 인덱스를 구한 뒤 그 리스트 head에 삽입*/
 static void *seg_free_lists[LISTLIMIT]; 
@@ -112,7 +112,7 @@ static void mm_checkheap(int verbose);
 int mm_init(void)
 {
     /* free list 시작점 초기화 */
-    for (int i = 0; i <=15; i++) {
+    for (int i = 0; i < LISTLIMIT; i++) {
         seg_free_lists[i] = NULL; // 초기화
     }
 
@@ -415,38 +415,55 @@ static void remove_free_block(void *bp)
 
 static int get_list_index(size_t size)
 {
-    if (size <= 32) {
+
+    if (size <= 24) {
         return 0;
-    } else if (size <= 64) {
+    } else if (size <= 32) {
         return 1;
-    } else if (size <= 128) {
+    } else if (size <= 40) {
         return 2;
-    } else if (size <= 256) {
+    } else if (size <= 48) {
         return 3;
-    } else if (size <= 512) {
+    } else if (size <= 56) {
         return 4;
-    } else if (size <= 1024) {
+    } else if (size <= 64) {
         return 5;
-    } else if (size <= 2048) {
+    } else if (size <= 80) {
         return 6;
-    } else if (size <= 4096) {
+    } else if (size <= 96) {
         return 7;
-    } else if (size <= 8192) {
+    } else if (size <= 112) {
         return 8;
-    } else if (size <= 16384) {
+    } else if (size <= 128) {
         return 9;
-    } else if (size <= 32768) {
+    } else if (size <= 256) {
         return 10;
-    } else if (size <= 65536) {
+    } else if (size <= 512) {
         return 11;
-    } else if (size <= 131072) {
+    } else if (size <= 1024) {
         return 12;
-    } else if (size <= 262144) {
+    } else if (size <= 2048) {
         return 13;
-    } else if (size <= 524288) {
+    } else if (size <= 4096) {
         return 14;
-    } else {
+    } else if (size <= 8192) {
         return 15;
+    } else if (size <= 16384) {
+        return 16;
+    } else if (size <= 32768) {
+        return 17;
+    } else if (size <= 65536) {
+        return 18;
+    } else if (size <= 131072) {
+        return 19;
+    } else if (size <= 262144) {
+        return 20;
+    } else if (size <= 524288) {
+        return 21;
+    } else if (size <= 1048576) {
+        return 22;
+    }else {
+        return 23;
     } 
 }
 
@@ -672,8 +689,17 @@ static void *find_fit(size_t asize)
     return NULL; // 끝까지 못 찾으면 NULL을 반환
 }
 
+/*
+ * mm_realloc - 가능하면 제자리에서 확장/축소하고,
+ * 불가능할 때만 새 블록을 할당해서 복사한다.
+ */
 void *mm_realloc(void *ptr, size_t size)
 {
+    size_t asize;          // 정렬/오버헤드를 포함한 새 블록 크기
+    size_t oldsize;        // 현재 블록 전체 크기
+    size_t next_alloc;     // 다음 블록 할당 여부
+    size_t combined_size;  // 현재 블록 + 다음 블록을 합친 크기
+    void *next_bp;
     void *newptr; // 새로 할당받을 블록의 포인터
     size_t copySize; // 기존 블록에서 새 블록으로 복사할 바이트 수
 
@@ -685,11 +711,73 @@ void *mm_realloc(void *ptr, size_t size)
         return NULL;
     }
 
+    /* 요청 크기를 allocator 내부 블록 크기로 맞춘다 */
+    asize = ALIGN(size + 2 * WSIZE);
+    if (asize < MINBLOCKSIZE) {
+        asize = MINBLOCKSIZE;
+    }
+    
+    oldsize = GET_SIZE(HDRP(ptr));
+
+    /* 현재 블록이 이미 충분히 크면 그대로 사용 */
+    if (oldsize >= asize) {
+        /*
+         * 줄어든 뒤 남는 공간이 최소 free block 크기 이상이면 split
+         * 너무 작으면 그냥 두는 편이 낫다.
+         */
+        if ((oldsize - asize) >= MINBLOCKSIZE) {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            next_bp = NEXT_BLKP(ptr);
+            PUT(HDRP(next_bp), PACK(oldsize - asize, 0));
+            PUT(FTRP(next_bp), PACK(oldsize - asize, 0));
+            coalesce(next_bp);
+        }
+        return ptr;
+    }
+
+    /*
+     * 다음 블록이 free이고 합치면 충분한 경우:
+     * 새 할당/복사 없이 제자리 확장
+     */
+    next_bp = NEXT_BLKP(ptr);
+    next_alloc = GET_ALLOC(HDRP(next_bp));
+
+    if (!next_alloc) {
+        combined_size = oldsize + GET_SIZE(HDRP(next_bp));
+
+        if (combined_size >= asize) {
+            remove_free_block(next_bp);
+
+            PUT(HDRP(ptr), PACK(combined_size, 1));
+            PUT(FTRP(ptr), PACK(combined_size, 1));
+
+            /*
+             * 확장 후 남는 공간이 충분하면 다시 split해서 free block으로 남긴다.
+             */
+            if ((combined_size - asize) >= MINBLOCKSIZE) {
+                PUT(HDRP(ptr), PACK(asize, 1));
+                PUT(FTRP(ptr), PACK(asize, 1));
+
+                next_bp = NEXT_BLKP(ptr);
+                PUT(HDRP(next_bp), PACK(combined_size - asize, 0));
+                PUT(FTRP(next_bp), PACK(combined_size - asize, 0));
+                insert_free_block(next_bp);
+            }
+
+            return ptr;
+        }
+    }
+    
+    /*
+     * 제자리 확장이 안 되면 새 블록을 할당하고 데이터 복사 후 기존 블록 해제
+     */
     newptr = mm_malloc(size); // 요청한 크기만큼 새 블록을 할당
     if (newptr == NULL) // 새 블록 할당에 실패하면 NULL 반환
         return NULL;
 
-    copySize = GET_SIZE(HDRP(ptr)) - DSIZE; // 현재 블록의 payload 크기 계산
+    copySize = oldsize - DSIZE; // 현재 블록의 payload 크기 계산
     if (size < copySize) // 새 요청 크기가 더 작으면 그 크기까지만 복사
         copySize = size;
 
