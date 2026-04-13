@@ -81,9 +81,11 @@ team_t team = {
 #define MINBLOCKSIZE (2 * DSIZE + 2 * sizeof(void *)) // 지금 컨테이너/Ubuntu 환경에서는 24가 나옴
 
 // segregated free lists 에서 free list 사이즈 클래스의 개수 - seg_free_lists[0] 부터 seg_free_lists[LISTLIMIT-1] 까지 할당
-#define LISTLIMIT 24
+#define LISTLIMIT 29
 // 각 size class에서 bounded best fit으로 확인할 최대 후보 수
 #define SEARCHLIMIT 10
+// 분할 후 남는 블록이 이 값보다 작으면 split하지 않는다.
+#define SPLITLIMIT 32
 
 /*segregated free list: 블록 크기를 보고 알맞은 리스트 인덱스를 구한 뒤 그 리스트 head에 삽입*/
 static void *seg_free_lists[LISTLIMIT]; 
@@ -438,34 +440,44 @@ static int get_list_index(size_t size)
         return 8;
     } else if (size <= 128) {
         return 9;
-    } else if (size <= 256) {
+    } else if (size <= 160) {
         return 10;
-    } else if (size <= 512) {
+    } else if (size <= 192) {
         return 11;
-    } else if (size <= 1024) {
+    } else if (size <= 224) {
         return 12;
-    } else if (size <= 2048) {
+    } else if (size <= 256) {
         return 13;
-    } else if (size <= 4096) {
+    } else if (size <= 384) {
         return 14;
-    } else if (size <= 8192) {
+    } else if (size <= 512) {
         return 15;
-    } else if (size <= 16384) {
+    } else if (size <= 768) {
         return 16;
-    } else if (size <= 32768) {
+    } else if (size <= 1024) {
         return 17;
-    } else if (size <= 65536) {
+    } else if (size <= 2048) {
         return 18;
-    } else if (size <= 131072) {
+    } else if (size <= 4096) {
         return 19;
-    } else if (size <= 262144) {
+    } else if (size <= 8192) {
         return 20;
-    } else if (size <= 524288) {
+    } else if (size <= 16384) {
         return 21;
-    } else if (size <= 1048576) {
+    } else if (size <= 32768) {
         return 22;
-    }else {
+    } else if (size <= 65536) {
         return 23;
+    } else if (size <= 131072) {
+        return 24;
+    } else if (size <= 262144) {
+        return 25;
+    } else if (size <= 524288) {
+        return 26;
+    } else if (size <= 1048576) {
+        return 27;
+    }else {
+        return 28;
     } 
 }
 
@@ -528,7 +540,7 @@ void *mm_malloc(size_t size)
  * (공간이 충분할 경우) split 후 남은 조각을 새 크기에 맞는 size class에 다시 넣는다.
  */
 
-// place - free block bp에 크기 asize인 할당 블록을 배치. 남는 공간이 최소 블록 크기 이상이면 블록을 분할
+// place - free block bp에 크기 asize인 할당 블록을 배치. 남는 공간이 32바이트 이상이면 블록을 분할
 static void place(void *bp, size_t asize)
 {
     size_t csize = GET_SIZE(HDRP(bp)); // 현재 free block의 전체 크기
@@ -536,8 +548,8 @@ static void place(void *bp, size_t asize)
     /* 이제 bp는 free block이 아니므로 free list에서 제거 */
     remove_free_block(bp);
 
-    // 현재 free block에서 요청 크기만큼 할당하고도 남는 공간이 최소 블록 크기(2 * DSIZE) 이상이면 분할한다.
-    if ((csize - asize) >= MINBLOCKSIZE) {
+    // 현재 free block에서 요청 크기만큼 할당하고도 남는 공간이 32바이트 이상이면 분할한다.
+    if ((csize - asize) >= SPLITLIMIT) {
         PUT(HDRP(bp), PACK(asize, 1));           // 앞부분을 할당 블록의 헤더로 설정
         PUT(FTRP(bp), PACK(asize, 1));           // 앞부분을 할당 블록의 푸터로 설정
 
@@ -766,12 +778,32 @@ void *mm_realloc(void *ptr, size_t size)
     }
 
     /*
-     * 다음 블록이 free이고 합치면 충분한 경우:
-     * 새 할당/복사 없이 제자리 확장
+     * heap 끝(epilogue 바로 앞)에 있는 블록이면
+     * mem_sbrk()로 힙을 직접 늘려 제자리에서 확장한다.
      */
     next_bp = NEXT_BLKP(ptr);
     next_alloc = GET_ALLOC(HDRP(next_bp));
 
+    /*
+     * 다음 블록이 epilogue라면 현재 블록은 힙 끝에 있다.
+     * 이 경우 새 블록을 할당하지 말고 힙을 직접 늘려서
+     * 현재 블록을 제자리에서 확장할 수 있다.
+     */
+    if (GET_SIZE(HDRP(next_bp)) == 0) {
+        size_t extend_size = asize - oldsize;
+
+        if ((long)mem_sbrk(extend_size) != -1) {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+            PUT(HDRP(NEXT_BLKP(ptr)), PACK(0, 1));
+            return ptr;
+        }
+    }
+
+    /*
+     * 다음 블록이 free이고 합치면 충분한 경우:
+     * 새 할당/복사 없이 제자리 확장
+     */
     if (!next_alloc) {
         combined_size = oldsize + GET_SIZE(HDRP(next_bp));
 
