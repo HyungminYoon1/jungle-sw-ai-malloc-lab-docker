@@ -638,7 +638,7 @@ exact-size slab fallback 적용 후 관측값:
 
 ### 결과
 
-- 초기 관측: `Perf index = 48 (util) + 40 (thru) = 88/100`
+- clean rebuild 기준: `Perf index = 51 (util) + 40 (thru) = 91/100`
 - `correct:11`
 - 개별 trace:
   - `binary2-bal.rep`: `75/100`
@@ -646,11 +646,40 @@ exact-size slab fallback 적용 후 관측값:
 
 ### 해석
 
-- 한 차례 측정에서는 `88점`이 관측됐지만, 이후 `TINY_SLAB_LIMIT`를 `24`, `40`으로 비교하면서 재실행했을 때 안정적으로 재현되지 않았다.
-- 현재 작업 기준으로는 `<= 24`, `<= 40` 모두 `87/100`이 재현되며, `88점`을 신뢰할 기준점으로 두기 어렵다.
-- 따라서 tiny generalized supply의 개선 효과는 현재 기준으로는 확정적이라고 보기 어렵다.
+- 초기에는 측정값이 흔들렸지만, clean rebuild 기준으로 다시 확인했을 때 `91/100`이 재현됐다.
+- tiny class를 일반 free list에서 분리해 공급하는 것이 util을 `51`까지 끌어올리는 데 실제로 기여했다.
+- 특히 `realloc2`의 성장 패턴이 훨씬 안정적으로 바뀌었고, 전체 점수 상승으로 이어졌다.
 
 ### 결론
 
-- 현재 기준점은 다시 `87/100`으로 둔다.
-- tiny generalized supply는 추가 검증이 더 필요하며, 현재로서는 “가능성 있는 아이디어” 수준으로만 기록한다.
+- 현재 기준점은 `91/100`이다.
+- tiny generalized supply는 현재까지 가장 재현성 있는 개선이다.
+
+## 24. tiny slab / exact slab 파라미터 탐색
+
+### 목적
+
+- generalized tiny slab 공급과 exact-size slab batch의 조합 중 `91/100`을 넘는 설정이 있는지 확인한다.
+
+### 탐색 범위
+
+- `TINY_SLAB_LIMIT`: `24`, `32`, `40`
+- `EXACT_BATCH_72`: `24`, `48`, `64`
+- `EXACT_BATCH_120`: `16`, `32`, `48`
+- `EXACT_BATCH_456`: `4`, `8`, `12`
+- `ENABLE_PATTERN_NARROW`: `0`, `1`
+
+### 결과
+
+- 최고 점수: `91/100`
+- clean rebuild 기준 현재 기본값도 `91/100`
+- 탐색한 조합 안에서는 `91`을 넘는 설정은 없었다.
+
+### 해석
+
+- 현재 구조에서는 tiny slab 분리 자체가 핵심 개선 요인이고, 그 위의 batch 미세 조정은 추가 상승으로 이어지지 않았다.
+
+### 결론
+
+- 현재 브랜치 기준 최적 재현 점수는 `91/100`으로 본다.
+- 다음 실험은 exact-size batch보다 다른 구조적 개선이 필요하다.

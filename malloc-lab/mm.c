@@ -84,14 +84,46 @@ team_t team = {
 // segregated free lists 에서 free list 사이즈 클래스의 개수 - seg_free_lists[0] 부터 seg_free_lists[LISTLIMIT-1] 까지 할당
 #define LISTLIMIT 29
 // 각 size class에서 bounded best fit으로 확인할 최대 후보 수
+#ifndef SEARCHLIMIT
 #define SEARCHLIMIT 10
+#endif
 // 분할 후 남는 블록이 이 값보다 작으면 split하지 않는다.
+#ifndef SPLITLIMIT
 #define SPLITLIMIT 32
+#endif
+#ifndef TINY_SLAB_LIMIT
 #define TINY_SLAB_LIMIT 32
+#endif
+#ifndef OVERFIT_EXACT_SLAB
 #define OVERFIT_EXACT_SLAB 1
+#endif
+#ifndef PATTERN_ALT_THRESHOLD
 #define PATTERN_ALT_THRESHOLD 6
+#endif
+#ifndef PATTERN_FREE_BURST_THRESHOLD
 #define PATTERN_FREE_BURST_THRESHOLD 32
+#endif
+#ifndef PATTERN_FREE_BURST_WINDOW
 #define PATTERN_FREE_BURST_WINDOW 32
+#endif
+#ifndef ENABLE_PATTERN_NARROW
+#define ENABLE_PATTERN_NARROW 1
+#endif
+#ifndef EXACT_BATCH_72
+#define EXACT_BATCH_72 48
+#endif
+#ifndef EXACT_BATCH_120
+#define EXACT_BATCH_120 32
+#endif
+#ifndef EXACT_BATCH_456
+#define EXACT_BATCH_456 8
+#endif
+#ifndef TINY_BATCH_MIN
+#define TINY_BATCH_MIN 16
+#endif
+#ifndef TINY_BATCH_MAX
+#define TINY_BATCH_MAX 128
+#endif
 
 /*segregated free list: 블록 크기를 보고 알맞은 리스트 인덱스를 구한 뒤 그 리스트 head에 삽입*/
 static void *seg_free_lists[LISTLIMIT]; 
@@ -211,11 +243,11 @@ static int exact_slab_batch(size_t asize)
 {
     switch (asize) {
     case 72:
-        return 48;
+        return EXACT_BATCH_72;
     case 120:
-        return 32;
+        return EXACT_BATCH_120;
     case 456:
-        return 8;
+        return EXACT_BATCH_456;
     default:
         return 1;
     }
@@ -225,10 +257,10 @@ static int tiny_slab_batch(size_t asize)
 {
     int batch = (int)(CHUNKSIZE / asize);
 
-    if (batch < 16)
-        batch = 16;
-    if (batch > 128)
-        batch = 128;
+    if (batch < TINY_BATCH_MIN)
+        batch = TINY_BATCH_MIN;
+    if (batch > TINY_BATCH_MAX)
+        batch = TINY_BATCH_MAX;
 
     return batch;
 }
@@ -330,10 +362,15 @@ static void note_malloc_completion(void)
 
 static int should_use_narrow_slab(size_t asize)
 {
+#if !ENABLE_PATTERN_NARROW
+    (void)asize;
+    return 0;
+#else
     if (!pattern_alt_latched || pattern_free_window == 0)
         return 0;
 
     return narrow_slab_size(asize) != 0;
+#endif
 }
 
 static void *alloc_from_slab(size_t asize, int batch)
