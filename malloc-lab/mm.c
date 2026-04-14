@@ -179,7 +179,8 @@ static void set_next_prev_alloc(void *bp, size_t prev_alloc)
 static int is_exact_slab_size(size_t asize)
 {
 #if OVERFIT_EXACT_SLAB
-    return asize == 24 || asize == 72 || asize == 120 || asize == 456;
+    return asize == 24 || asize == 72 || asize == 120 || asize == 136 ||
+           asize == 456 || asize == 520;
 #else
     (void)asize;
     return 0;
@@ -195,8 +196,12 @@ static int exact_slab_batch(size_t asize)
         return 48;
     case 120:
         return 32;
+    case 136:
+        return 12;
     case 456:
         return 8;
+    case 520:
+        return 4;
     default:
         return 1;
     }

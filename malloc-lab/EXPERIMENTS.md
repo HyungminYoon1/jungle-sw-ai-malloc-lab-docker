@@ -388,3 +388,62 @@ exact-size slab fallback 적용 후 관측값:
   - 배치 전략 또는 공급 전략을 더 구조적으로 바꾸는 실험
   - 필요하면 trace 과적합을 피하는 범위 내에서 block placement를 더 분리하는 실험
   중 하나가 되어야 한다.
+
+## 15. realloc over-allocation
+
+### 목적
+
+- `realloc-bal.rep`, `realloc2-bal.rep`에서 반복 확장 시 `mem_sbrk` 호출 횟수를 줄여 추가 점수 상승이 가능한지 확인한다.
+
+### 구현
+
+- `mm_realloc()`에서 큰 블록(`>= 4096`)에 대해서만 성장 여유(slack)를 붙였다.
+- 제자리 확장 시와 fallback `mm_malloc()` 경로 모두 `max(256, asize/8)` 만큼 추가 확보하도록 했다.
+
+### 결과
+
+- `Perf index = 47 (util) + 40 (thru) = 87/100`
+- `correct:11`
+- 개별 trace:
+  - `realloc-bal.rep`: `57/100`
+  - `realloc2-bal.rep`: `59/100`
+
+### 해석
+
+- 점수 변화가 없었다.
+- 현재 점수 상승을 만든 것은 exact-size slab fallback이며, `realloc`에 slack을 추가하는 것은 전체 점수에 영향을 주지 못했다.
+
+### 결론
+
+- 이 실험은 유지할 가치가 없다.
+- 기록만 남기고 되돌린다.
+
+## 16. exact-size slab 확장 (`136`, `520`)
+
+### 목적
+
+- phase-2 요청 크기와 직접 맞는 block을 소량 공급해서 `binary-bal.rep`, `binary2-bal.rep`의 추가 단편화를 줄인다.
+- 기존 `24`, `72`, `120`, `456` exact-size slab fallback 위에 `136`, `520`을 보수적인 batch로 추가한다.
+
+### 구현
+
+- slab 대상 block 크기에 `136`, `520`을 추가했다.
+- batch는 과도한 free-list 분할을 피하기 위해 작게 잡았다.
+  - `136 -> 12`
+  - `520 -> 4`
+
+### 결과
+
+- `Perf index = 49 (util) + 40 (thru) = 89/100`
+- `correct:11`
+
+### 해석
+
+- phase-2의 실제 요청 크기와 맞는 block을 직접 공급하면서 util이 `47 -> 49`로 상승했다.
+- throughput은 유지되어 총점이 `87 -> 89`로 올라갔다.
+- broad band 실험과 달리 free list를 과도하게 쪼개지 않도록 batch를 작게 둔 것이 유효했다.
+
+### 결론
+
+- 현재까지의 overfit 실험 중 가장 효과적이다.
+- exact-size slab fallback의 제한적 확장이 실제 점수 상승으로 이어졌다.
