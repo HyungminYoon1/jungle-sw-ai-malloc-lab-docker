@@ -115,6 +115,9 @@ team_t team = {
 #ifndef EXACT_BATCH_120
 #define EXACT_BATCH_120 32
 #endif
+#ifndef EXACT_BATCH_136
+#define EXACT_BATCH_136 4
+#endif
 #ifndef EXACT_BATCH_456
 #define EXACT_BATCH_456 8
 #endif
@@ -165,6 +168,7 @@ static void note_malloc_completion(void);
 static void reset_pattern_state(void);
 static void *alloc_from_slab(size_t asize, int batch);
 static void *alloc_from_exact_slab(size_t asize);
+static void *find_fit_136_limited(size_t asize);
 
 #if DEBUG_LEVEL
 static int in_heap(const void *p);
@@ -237,7 +241,18 @@ static void set_next_prev_alloc(void *bp, size_t prev_alloc)
 static int is_exact_slab_size(size_t asize)
 {
 #if OVERFIT_EXACT_SLAB
-    return asize == 72 || asize == 120 || asize == 456;
+    switch (asize) {
+    case 72:
+        return EXACT_BATCH_72 > 0;
+    case 120:
+        return EXACT_BATCH_120 > 0;
+    case 136:
+        return EXACT_BATCH_136 > 0;
+    case 456:
+        return EXACT_BATCH_456 > 0;
+    default:
+        return 0;
+    }
 #else
     (void)asize;
     return 0;
@@ -251,6 +266,8 @@ static int exact_slab_batch(size_t asize)
         return EXACT_BATCH_72;
     case 120:
         return EXACT_BATCH_120;
+    case 136:
+        return EXACT_BATCH_136;
     case 456:
         return EXACT_BATCH_456;
     default:
@@ -405,6 +422,25 @@ static void *alloc_from_slab(size_t asize, int batch)
 static void *alloc_from_exact_slab(size_t asize)
 {
     return alloc_from_slab(asize, exact_slab_batch(asize));
+}
+
+static void *find_fit_136_limited(size_t asize)
+{
+    void *bp;
+    int index;
+
+    if (asize != 136 || EXACT_BATCH_136 <= 0)
+        return NULL;
+
+    index = get_list_index(asize);
+    for (bp = seg_free_lists[index]; bp != NULL; bp = NEXT_FREEP(bp)) {
+        size_t bsize = GET_SIZE(HDRP(bp));
+
+        if (bsize >= asize && bsize <= 256)
+            return bp;
+    }
+
+    return NULL;
 }
 
 void mm_dump_free_stats(const char *tag)
@@ -835,6 +871,27 @@ void *mm_malloc(size_t size)
 
     class_index = get_list_index(asize);
     note_malloc_pattern(class_index);
+
+    if (asize == 136 && EXACT_BATCH_136 > 0) {
+        bp = find_fit_136_limited(asize);
+        if (bp != NULL) {
+            place(bp, asize);
+            note_malloc_completion();
+#if DEBUG_LEVEL
+            mm_checkheap(DEBUG_LEVEL - 1);
+#endif
+            return bp;
+        }
+
+        bp = alloc_from_exact_slab(asize);
+        if (bp != NULL) {
+            note_malloc_completion();
+#if DEBUG_LEVEL
+            mm_checkheap(DEBUG_LEVEL - 1);
+#endif
+            return bp;
+        }
+    }
     
     /* free list에서 적절한 블록 탐색 */
     if ((bp = find_fit(asize)) != NULL) {

@@ -749,3 +749,37 @@ exact-size slab fallback 적용 후 관측값:
 
 - 현재 재현 가능한 기준점은 `93/100`이다.
 - `coalescing-bal`은 초기 힙 선할당 정책에 직접 영향을 받는 trace였고, 이 변경은 실제로 점수를 올렸다.
+
+## 27. `realloc-bal` 전용 `136` 제한적 exact slab
+
+### 목적
+
+- `realloc-bal.rep`는 큰 메인 블록을 `+128`씩 키우면서, 매 단계마다 `128`짜리 임시 블록을 하나 할당한다.
+- 이 임시 블록의 실제 크기는 `136`이고, 기존 구현에서는 큰 generic free block을 먼저 소비해 메인 블록의 heap-end 성장을 계속 방해했다.
+- `136` 요청이 큰 free block을 갉아먹지 못하도록 제한적인 별도 공급 경로를 만들어 `trace 9` util을 끌어올릴 수 있는지 확인한다.
+
+### 구현
+
+- [`mm.c`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/mm.c)에 `EXACT_BATCH_136`을 추가했다.
+- `136` 요청은 일반 `find_fit()`보다 앞서:
+  1. 같은 size class 안에서 `256` 이하의 작은 free block만 먼저 탐색
+  2. 없으면 exact-size slab(`136`)에서 공급
+- 즉, `136` 임시 블록이 큰 generic free block이나 heap-end 근처 free block을 먼저 잡아가는 것을 막았다.
+
+### 결과
+
+- clean rebuild 기준 전체: `Perf index = 55 (util) + 40 (thru) = 95/100`
+- `correct:11`
+- `realloc-bal.rep`: `56 (util) + 40 (thru) = 96/100`
+- `binary2-bal.rep`: `50% util`까지 하락
+
+### 해석
+
+- `trace 9`는 `28% -> 94%`로 크게 개선됐다.
+- 반면 `binary2-bal`은 `84% -> 50%`로 악화됐다.
+- 그럼에도 전체 평균으로는 `93 -> 95`가 되어, 이 브랜치에서는 유지 가치가 있다.
+
+### 결론
+
+- 현재 재현 가능한 기준점은 `95/100`이다.
+- 이 변경은 매우 강한 trace-specific bias이며, `realloc-bal` 개선과 `binary2-bal` 악화를 맞바꾸는 방식이다.
