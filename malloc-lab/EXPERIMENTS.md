@@ -549,3 +549,43 @@ exact-size slab fallback 적용 후 관측값:
 
 - 유지 가치가 없다.
 - `binary2`만 직접 겨냥하는 `136` bias는 전체 score 상승으로 이어지지 않았다.
+
+## 21. pattern-based narrow slab fallback
+
+### 목적
+
+- 정확한 trace 값 하드코딩 대신, 다음 세 신호가 동시에 나타날 때만 narrow slab fallback을 켠다.
+  - 최근 요청이 small/medium class 사이에서 교차 반복됨
+  - `free` burst가 누적됨
+  - 일반 `find_fit()` 실패
+- 목표는 `trace-specific bias`를 더 일반적인 패턴 조건으로 완화하는 것이다.
+
+### 구현
+
+- `mm_malloc()`에서 최근 size class alternation을 추적했다.
+- `mm_free()`에서 `free` burst를 짧은 윈도우로 누적했다.
+- narrow slab fallback은 아래 조건이 모두 맞을 때만 허용했다.
+  - alternating class burst 감지
+  - `free` burst window 활성
+  - `find_fit()` 실패
+- fallback 대상은 좁은 band만 사용했다.
+  - `120 < asize <= 136 -> 136`
+  - `456 < asize <= 520 -> 520`
+
+### 결과
+
+- 전체: `Perf index = 47 (util) + 40 (thru) = 87/100`
+- `correct:11`
+- 개별 trace:
+  - `binary-bal.rep`: `98/100`
+  - `binary2-bal.rep`: `75/100`
+
+### 해석
+
+- exact value 하드코딩보다 조건은 일반화됐지만, 전체 점수는 기준 상태와 동일했다.
+- `binary-bal` 하나에는 여전히 잘 맞았지만, 전체 평균을 더 올릴 정도의 개선은 없었다.
+
+### 결론
+
+- 유지 가치가 약하다.
+- `pattern-based bias`는 `trace-specific bias`보다 모양은 낫지만, 현재 데이터셋에서는 추가 점수 상승을 만들지 못했다.

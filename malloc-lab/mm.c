@@ -88,9 +88,18 @@ team_t team = {
 // 분할 후 남는 블록이 이 값보다 작으면 split하지 않는다.
 #define SPLITLIMIT 32
 #define OVERFIT_EXACT_SLAB 1
+#define PATTERN_ALT_THRESHOLD 6
+#define PATTERN_FREE_BURST_THRESHOLD 32
+#define PATTERN_FREE_BURST_WINDOW 32
 
 /*segregated free list: 블록 크기를 보고 알맞은 리스트 인덱스를 구한 뒤 그 리스트 head에 삽입*/
 static void *seg_free_lists[LISTLIMIT]; 
+static int pattern_alt_a = -1;
+static int pattern_alt_b = -1;
+static int pattern_alt_len = 0;
+static int pattern_alt_latched = 0;
+static int pattern_recent_frees = 0;
+static int pattern_free_window = 0;
 
 /* free list 조작 함수 */
 static void insert_free_block(void *bp);
@@ -108,6 +117,16 @@ static void write_free_block(void *bp, size_t size, size_t prev_alloc);
 static void set_next_prev_alloc(void *bp, size_t prev_alloc);
 static int is_exact_slab_size(size_t asize);
 static int exact_slab_batch(size_t asize);
+static int narrow_slab_size(size_t asize);
+static int narrow_slab_batch(size_t asize);
+static int should_use_narrow_slab(size_t asize);
+static int class_is_small(int index);
+static int class_is_medium(int index);
+static void note_malloc_pattern(int class_index);
+static void note_free_pattern(void);
+static void note_malloc_completion(void);
+static void reset_pattern_state(void);
+static void *alloc_from_slab(size_t asize, int batch);
 static void *alloc_from_exact_slab(size_t asize);
 
 #if DEBUG_LEVEL
@@ -202,9 +221,111 @@ static int exact_slab_batch(size_t asize)
     }
 }
 
-static void *alloc_from_exact_slab(size_t asize)
+static int narrow_slab_size(size_t asize)
 {
-    int batch = exact_slab_batch(asize);
+    if (asize > 120 && asize <= 136)
+        return 136;
+    if (asize > 456 && asize <= 520)
+        return 520;
+    return 0;
+}
+
+static int narrow_slab_batch(size_t asize)
+{
+    if (asize == 136)
+        return 12;
+    if (asize == 520)
+        return 4;
+    return 1;
+}
+
+static int class_is_small(int index)
+{
+    return index >= 0 && index <= 6;
+}
+
+static int class_is_medium(int index)
+{
+    return index >= 9 && index <= 15;
+}
+
+static void reset_pattern_state(void)
+{
+    pattern_alt_a = -1;
+    pattern_alt_b = -1;
+    pattern_alt_len = 0;
+    pattern_alt_latched = 0;
+    pattern_recent_frees = 0;
+    pattern_free_window = 0;
+}
+
+static void note_malloc_pattern(int class_index)
+{
+    if (pattern_alt_len == 0) {
+        pattern_alt_a = class_index;
+        pattern_alt_len = 1;
+        return;
+    }
+
+    if (pattern_alt_len == 1) {
+        if (class_index == pattern_alt_a)
+            return;
+
+        pattern_alt_b = class_index;
+        pattern_alt_len = 2;
+    } else {
+        int expected = (pattern_alt_len % 2 == 0) ? pattern_alt_a : pattern_alt_b;
+
+        if (class_index == expected) {
+            pattern_alt_len++;
+        } else if (class_index != pattern_alt_b) {
+            pattern_alt_a = pattern_alt_b;
+            pattern_alt_b = class_index;
+            pattern_alt_len = 2;
+        } else {
+            pattern_alt_a = class_index;
+            pattern_alt_b = -1;
+            pattern_alt_len = 1;
+        }
+    }
+
+    if (pattern_alt_len >= PATTERN_ALT_THRESHOLD &&
+        ((class_is_small(pattern_alt_a) && class_is_medium(pattern_alt_b)) ||
+         (class_is_small(pattern_alt_b) && class_is_medium(pattern_alt_a)))) {
+        pattern_alt_latched = 1;
+    }
+}
+
+static void note_free_pattern(void)
+{
+    if (pattern_recent_frees < PATTERN_FREE_BURST_THRESHOLD)
+        pattern_recent_frees++;
+
+    if (pattern_alt_latched && pattern_recent_frees >= PATTERN_FREE_BURST_THRESHOLD)
+        pattern_free_window = PATTERN_FREE_BURST_WINDOW;
+}
+
+static void note_malloc_completion(void)
+{
+    pattern_recent_frees = 0;
+
+    if (pattern_free_window > 0) {
+        pattern_free_window--;
+        if (pattern_free_window == 0)
+            pattern_alt_latched = 0;
+    }
+}
+
+static int should_use_narrow_slab(size_t asize)
+{
+    if (!pattern_alt_latched || pattern_free_window == 0)
+        return 0;
+
+    return narrow_slab_size(asize) != 0;
+}
+
+static void *alloc_from_slab(size_t asize, int batch)
+{
     size_t total = asize * batch;
     char *bp;
     char *cursor;
@@ -225,6 +346,11 @@ static void *alloc_from_exact_slab(size_t asize)
 
     PUT(HDRP(cursor), PACK(0, 1, (batch == 1) ? 1 : 0));
     return bp;
+}
+
+static void *alloc_from_exact_slab(size_t asize)
+{
+    return alloc_from_slab(asize, exact_slab_batch(asize));
 }
 
 void mm_dump_free_stats(const char *tag)
@@ -640,6 +766,8 @@ void *mm_malloc(size_t size)
     size_t asize;      /* 정렬/오버헤드를 포함한 실제 블록 크기 */
     size_t extendsize; /* 힙 확장 크기 */
     char *bp;
+    int class_index;
+    int band_size;
 
     if (size == 0)             // 0바이트 요청은 할당하지 않음
         return NULL;
@@ -650,19 +778,38 @@ void *mm_malloc(size_t size)
     /* explicit free list는 prev/next 포인터를 담을 최소 크기가 필요하다 */
     if (asize < MINBLOCKSIZE)
         asize = MINBLOCKSIZE;
+
+    class_index = get_list_index(asize);
+    note_malloc_pattern(class_index);
     
     /* free list에서 적절한 블록 탐색 */
     if ((bp = find_fit(asize)) != NULL) {
         place(bp, asize);
+        note_malloc_completion();
 #if DEBUG_LEVEL
         mm_checkheap(DEBUG_LEVEL - 1);
 #endif
         return bp;
     }
 
+    if (should_use_narrow_slab(asize)) {
+        band_size = narrow_slab_size(asize);
+        if (band_size != 0) {
+            bp = alloc_from_slab((size_t)band_size, narrow_slab_batch((size_t)band_size));
+            if (bp != NULL) {
+                note_malloc_completion();
+#if DEBUG_LEVEL
+                mm_checkheap(DEBUG_LEVEL - 1);
+#endif
+                return bp;
+            }
+        }
+    }
+
     if (is_exact_slab_size(asize)) {
         if ((bp = alloc_from_exact_slab(asize)) == NULL)
             return NULL;
+        note_malloc_completion();
 #if DEBUG_LEVEL
         mm_checkheap(DEBUG_LEVEL - 1);
 #endif
@@ -676,6 +823,7 @@ void *mm_malloc(size_t size)
 
     // 새로 확장한 free block에 요청 블록을 배치한 뒤 주소를 반환한다.
     place(bp, asize);
+    note_malloc_completion();
 
 #if DEBUG_LEVEL
     mm_checkheap(DEBUG_LEVEL - 1);
@@ -765,6 +913,7 @@ void mm_free(void *bp)
     write_free_block(bp, size, prev_alloc);
     set_next_prev_alloc(bp, 0);
 
+    note_free_pattern();
     coalesce(bp);
 
 #if DEBUG_LEVEL
@@ -904,6 +1053,8 @@ void *mm_realloc(void *ptr, size_t size)
         mm_free(ptr);
         return NULL;
     }
+
+    reset_pattern_state();
 
     /* 요청 크기를 allocator 내부 블록 크기로 맞춘다 */
     asize = ALIGN(size + WSIZE);
