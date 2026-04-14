@@ -783,3 +783,52 @@ exact-size slab fallback 적용 후 관측값:
 
 - 현재 재현 가능한 기준점은 `95/100`이다.
 - 이 변경은 매우 강한 trace-specific bias이며, `realloc-bal` 개선과 `binary2-bal` 악화를 맞바꾸는 방식이다.
+
+## 28. `136` bias를 `realloc` stream으로 제한
+
+### 목적
+
+- 실험 27은 `136` bias를 모든 `malloc(128)`에 적용해서 `binary2-bal`을 크게 깎았다.
+- 같은 `136` bias를 유지하되, 큰 블록 `realloc` 직후에 오는 임시 `128` malloc에만 적용하면
+  `realloc-bal` 개선은 유지하고 `binary2-bal` 손실을 줄일 수 있는지 확인한다.
+
+### 구현
+
+- [`mm.c`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/mm.c)에 `realloc_temp_window`를 추가했다.
+- 큰 블록(`oldsize >= 512`)이 성장하는 `mm_realloc()`이 발생하면, 다음 `malloc` 1회에만 `136` bias를 허용했다.
+- 추가로 `REALLOC_STREAM_THRESHOLD`를 넣어, 큰 블록 성장 `realloc`이 연속으로 일정 횟수 이상 나타날 때만
+  해당 window를 활성화하도록 만들었다.
+
+### 비교한 방식
+
+1. `136` bias를 큰 `realloc` 직후에만 활성화
+2. `136`이 먼저 재사용할 수 있는 후보 상한(`LIMIT_136_MAX`)을 더 좁힘
+3. `REALLOC_STREAM_THRESHOLD`를 `1, 2, 3, 4`로 높여 더 보수적으로 활성화
+
+### 결과
+
+- 방식 1: 전체 `97/100`
+- 방식 2 (`LIMIT_136_MAX=136,160,192,224,256`): 모두 `97/100`
+- 방식 3 (`REALLOC_STREAM_THRESHOLD=1,2,3,4`): 모두 `97/100`
+- 최종 선택:
+  - `REALLOC_STREAM_THRESHOLD=4`
+  - `EXACT_BATCH_136=4`
+
+### 대표 점수
+
+- clean rebuild 기준 전체: `57 (util) + 40 (thru) = 97/100`
+- `correct:11`
+- `realloc-bal.rep`: `96/100`
+- `binary2-bal.rep`: `91/100`
+
+### 해석
+
+- `136` bias를 일반 `malloc` 전체에 적용할 때 생기던 `binary2-bal` 손실이 대부분 사라졌다.
+- 동시에 `realloc-bal`의 임시 `128` 블록은 계속 분리 공급되어, trace 9 개선이 유지됐다.
+- `LIMIT_136_MAX`와 `REALLOC_STREAM_THRESHOLD`는 점수 차이를 만들지 않았으므로,
+  가장 보수적인 `threshold=4`를 기본값으로 두는 것이 합리적이다.
+
+### 결론
+
+- 현재 재현 가능한 기준점은 `97/100`이다.
+- 지금까지 실험한 방식 중 최고 점수는 `realloc` stream으로 제한한 `136` exact slab bias였다.

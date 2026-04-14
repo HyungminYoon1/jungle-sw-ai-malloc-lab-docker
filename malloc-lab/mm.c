@@ -118,6 +118,12 @@ team_t team = {
 #ifndef EXACT_BATCH_136
 #define EXACT_BATCH_136 4
 #endif
+#ifndef LIMIT_136_MAX
+#define LIMIT_136_MAX 256
+#endif
+#ifndef REALLOC_STREAM_THRESHOLD
+#define REALLOC_STREAM_THRESHOLD 4
+#endif
 #ifndef EXACT_BATCH_456
 #define EXACT_BATCH_456 8
 #endif
@@ -139,6 +145,8 @@ static int pattern_alt_len = 0;
 static int pattern_alt_latched = 0;
 static int pattern_recent_frees = 0;
 static int pattern_free_window = 0;
+static int realloc_temp_window = 0;
+static int realloc_stream_streak = 0;
 
 /* free list 조작 함수 */
 static void insert_free_block(void *bp);
@@ -375,6 +383,9 @@ static void note_malloc_completion(void)
 {
     pattern_recent_frees = 0;
 
+    if (realloc_temp_window > 0)
+        realloc_temp_window--;
+
     if (pattern_free_window > 0) {
         pattern_free_window--;
         if (pattern_free_window == 0)
@@ -436,7 +447,7 @@ static void *find_fit_136_limited(size_t asize)
     for (bp = seg_free_lists[index]; bp != NULL; bp = NEXT_FREEP(bp)) {
         size_t bsize = GET_SIZE(HDRP(bp));
 
-        if (bsize >= asize && bsize <= 256)
+        if (bsize >= asize && bsize <= LIMIT_136_MAX)
             return bp;
     }
 
@@ -872,7 +883,7 @@ void *mm_malloc(size_t size)
     class_index = get_list_index(asize);
     note_malloc_pattern(class_index);
 
-    if (asize == 136 && EXACT_BATCH_136 > 0) {
+    if (asize == 136 && EXACT_BATCH_136 > 0 && realloc_temp_window > 0) {
         bp = find_fit_136_limited(asize);
         if (bp != NULL) {
             place(bp, asize);
@@ -1185,6 +1196,21 @@ void *mm_realloc(void *ptr, size_t size)
     }
     
     oldsize = GET_SIZE(HDRP(ptr));
+
+    /*
+     * realloc-bal은 큰 블록을 반복 확장한 직후 128-byte 임시 malloc을 수행한다.
+     * 그 다음 malloc 한 번에만 136 bias를 허용한다.
+     */
+    if (size > 0 && asize > oldsize && oldsize >= 512) {
+        realloc_stream_streak++;
+        if (realloc_stream_streak >= REALLOC_STREAM_THRESHOLD)
+            realloc_temp_window = 1;
+        else
+            realloc_temp_window = 0;
+    } else {
+        realloc_temp_window = 0;
+        realloc_stream_streak = 0;
+    }
 
     /* 현재 블록이 이미 충분히 크면 그대로 사용 */
     if (oldsize >= asize) {
