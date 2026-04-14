@@ -715,3 +715,37 @@ exact-size slab fallback 적용 후 관측값:
 
 - 현재 재현 가능한 기준점은 `92/100`이다.
 - 다음 실험은 이 `92점` 기준에서 다시 진행한다.
+
+## 26. 초기 힙 선할당 제거 (`INITIAL_EXTEND_SIZE=0`)
+
+### 목적
+
+- `coalescing-bal.rep`는 `4095`, `4095`, `free`, `free`, `8190` 반복이다.
+- 기존 구현은 `mm_init()`에서 `CHUNKSIZE`만큼 미리 free block을 만들기 때문에,
+  실제 요청보다 약간 작은 초기 free block이 반복해서 남으며 peak heap size를 키운다.
+- 초기 선할당을 제거하고, 첫 요청부터 필요한 크기만큼만 `extend_heap()` 하게 만들면
+  `coalescing` 계열 util이 오르는지 확인한다.
+
+### 구현
+
+- [`mm.c`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/mm.c)에 `INITIAL_EXTEND_SIZE` 매크로를 추가했다.
+- 기본값을 `0`으로 두고, [`mm_init()`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/mm.c)는
+  `INITIAL_EXTEND_SIZE > 0`일 때만 초기 free block을 생성하도록 바꿨다.
+- 즉, 기본 동작은 “프롤로그/에필로그만 만들고 실제 free block은 첫 `malloc`에서 필요한 만큼 생성”이다.
+
+### 결과
+
+- clean rebuild 기준 전체: `Perf index = 53 (util) + 40 (thru) = 93/100`
+- `correct:11`
+- `coalescing-bal.rep`: `60 (util) + 40 (thru) = 100/100`
+
+### 해석
+
+- `coalescing-bal`의 낮은 util은 병합 실패가 아니라, 초기 `CHUNKSIZE`가 반복적으로 남기는 여분 free 공간이 원인이었다.
+- 초기 선할당을 제거하자 해당 trace의 peak heap size가 크게 줄었고, 전체 util도 `52 -> 53`으로 상승했다.
+- 다른 trace에서는 throughput 저하가 관찰되지 않았고, 전체 throughput 점수는 그대로 `40`을 유지했다.
+
+### 결론
+
+- 현재 재현 가능한 기준점은 `93/100`이다.
+- `coalescing-bal`은 초기 힙 선할당 정책에 직접 영향을 받는 trace였고, 이 변경은 실제로 점수를 올렸다.

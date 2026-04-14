@@ -124,6 +124,9 @@ team_t team = {
 #ifndef TINY_BATCH_MAX
 #define TINY_BATCH_MAX 64
 #endif
+#ifndef INITIAL_EXTEND_SIZE
+#define INITIAL_EXTEND_SIZE 0
+#endif
 
 /*segregated free list: 블록 크기를 보고 알맞은 리스트 인덱스를 구한 뒤 그 리스트 head에 삽입*/
 static void *seg_free_lists[LISTLIMIT]; 
@@ -191,9 +194,11 @@ int mm_init(void)
     PUT(heap_listp + (3*WSIZE), PACK(0, 1, 1)); // 에필로그 헤더
     heap_listp += (2 * WSIZE);
 
-    // 초기 free block 생성: 비어있는 heap을 CHUNKSIZE 만큼의 free 블록으로 확장한다.
-    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
-        return -1;
+    // 초기 free block 생성: 필요할 때만 힙을 늘리는 실험을 위해 크기를 조절 가능하게 둔다.
+    if (INITIAL_EXTEND_SIZE > 0) {
+        if (extend_heap(INITIAL_EXTEND_SIZE / WSIZE) == NULL)
+            return -1;
+    }
 
 #if DEBUG_LEVEL
     mm_checkheap(DEBUG_LEVEL - 1);
