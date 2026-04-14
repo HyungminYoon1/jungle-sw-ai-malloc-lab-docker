@@ -49,3 +49,11 @@ memlib.{c,h}	힙과 sbrk 함수를 모델링합니다.
 드라이버 옵션 목록을 보려면:
 
 	unix> mdriver -h
+
+*******************************
+현재 결과
+*******************************
+
+- 최고 재현 점수: `97/100`
+- 현재 구현 파일: [`mm.c`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/mm.c)
+- 실험 기록: [`EXPERIMENTS.md`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/EXPERIMENTS.md)

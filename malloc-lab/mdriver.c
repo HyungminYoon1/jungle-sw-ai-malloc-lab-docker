@@ -66,6 +66,7 @@ typedef struct
 	int num_ids;		 /* alloc/realloc ID 개수 */
 	int num_ops;		 /* 서로 다른 요청 개수 */
 	int weight;			 /* 이 trace의 가중치(사용하지 않음) */
+	char *filename;      /* trace 파일 이름 */
 	traceop_t *ops;		 /* 요청 배열 */
 	char **blocks;		 /* malloc/realloc이 반환한 포인터 배열 */
 	size_t *block_sizes; /* 각 포인터에 대응하는 payload 크기 배열 */
@@ -138,6 +139,9 @@ static void usage(void);
 static void unix_error(char *msg);
 static void malloc_error(int tracenum, int opnum, char *msg);
 static void app_error(char *msg);
+static int should_log_growth(trace_t *trace);
+static const char *op_name(int type);
+static void dump_live_block_distribution(trace_t *trace, int opnum);
 
 /**************
  * 메인 루틴
@@ -521,6 +525,8 @@ static trace_t *read_trace(char *tracedir, char *filename)
 	/* trace 레코드 할당 */
 	if ((trace = (trace_t *)malloc(sizeof(trace_t))) == NULL)
 		unix_error("malloc 1 failed in read_trance");
+	if ((trace->filename = strdup(filename)) == NULL)
+		unix_error("strdup failed in read_trace");
 
 	/* trace 파일 헤더 읽기 */
 	strcpy(path, tracedir);
@@ -596,10 +602,77 @@ static trace_t *read_trace(char *tracedir, char *filename)
  */
 void free_trace(trace_t *trace)
 {
+	free(trace->filename);
 	free(trace->ops); /* 세 개의 배열을 해제 */
 	free(trace->blocks);
 	free(trace->block_sizes);
 	free(trace); /* 그리고 trace 레코드 자체도 해제 */
+}
+
+static int should_log_growth(trace_t *trace)
+{
+	return !strcmp(trace->filename, "binary-bal.rep") ||
+		   !strcmp(trace->filename, "binary2-bal.rep") ||
+		   !strcmp(trace->filename, "realloc-bal.rep") ||
+		   !strcmp(trace->filename, "realloc2-bal.rep");
+}
+
+static const char *op_name(int type)
+{
+	switch (type)
+	{
+	case ALLOC:
+		return "alloc";
+	case FREE:
+		return "free";
+	case REALLOC:
+		return "realloc";
+	default:
+		return "unknown";
+	}
+}
+
+static void dump_live_block_distribution(trace_t *trace, int opnum)
+{
+	int i;
+	int live_count = 0;
+	int count16 = 0, count64 = 0, count112 = 0, count128 = 0, count448 = 0, count512 = 0;
+	size_t live_bytes = 0;
+
+	for (i = 0; i < trace->num_ids; i++)
+	{
+		size_t sz = trace->block_sizes[i];
+		if (trace->blocks[i] == NULL || sz == 0)
+			continue;
+
+		live_count++;
+		live_bytes += sz;
+
+		if (sz == 16)
+			count16++;
+		else if (sz == 64)
+			count64++;
+		else if (sz == 112)
+			count112++;
+		else if (sz == 128)
+			count128++;
+		else if (sz == 448)
+			count448++;
+		else if (sz == 512)
+			count512++;
+	}
+
+	printf("[live-dist] trace=%s op=%d live_blocks=%d live_bytes=%zu sizes{16=%d,64=%d,112=%d,128=%d,448=%d,512=%d}\n",
+		   trace->filename,
+		   opnum,
+		   live_count,
+		   live_bytes,
+		   count16,
+		   count64,
+		   count112,
+		   count128,
+		   count448,
+		   count512);
 }
 
 /**********************************************************************
@@ -743,6 +816,7 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 	int size, newsize, oldsize;
 	int max_total_size = 0;
 	int total_size = 0;
+	int heap_before, heap_after;
 	char *p;
 	char *newp, *oldp;
 
@@ -750,9 +824,12 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 	mem_reset_brk();
 	if (mm_init() < 0)
 		app_error("mm_init failed in eval_mm_util");
+	memset(trace->blocks, 0, trace->num_ids * sizeof(char *));
+	memset(trace->block_sizes, 0, trace->num_ids * sizeof(size_t));
 
 	for (i = 0; i < trace->num_ops; i++)
 	{
+		heap_before = mem_heapsize();
 		switch (trace->ops[i].type)
 		{
 
@@ -800,6 +877,8 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 			p = trace->blocks[index];
 
 			mm_free(p);
+			trace->blocks[index] = NULL;
+			trace->block_sizes[index] = 0;
 
 			/* 현재 할당된 모든 블록의 총 크기 추적 */
 			total_size -= size;
@@ -808,6 +887,39 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
 
 		default:
 			app_error("Nonexistent request type in eval_mm_util");
+		}
+
+		heap_after = mem_heapsize();
+
+		if (!strcmp(trace->filename, "binary-bal.rep") && i == 5999)
+		{
+			dump_live_block_distribution(trace, i);
+			mm_dump_free_stats("binary-bal before phase-2");
+		}
+		if (!strcmp(trace->filename, "binary2-bal.rep") && i == 12014)
+		{
+			dump_live_block_distribution(trace, i);
+			mm_dump_free_stats("binary2-bal before phase-2");
+		}
+
+		if (should_log_growth(trace) && heap_after > heap_before)
+		{
+			int req_size = 0;
+			if (trace->ops[i].type == ALLOC || trace->ops[i].type == REALLOC)
+				req_size = trace->ops[i].size;
+
+			printf("[growth] trace=%s op=%d line=%d type=%s index=%d req=%d total=%d max=%d heap=%d->%d util_now=%.4f\n",
+				   trace->filename,
+				   i,
+				   LINENUM(i),
+				   op_name(trace->ops[i].type),
+				   trace->ops[i].index,
+				   req_size,
+				   total_size,
+				   max_total_size,
+				   heap_before,
+				   heap_after,
+				   heap_after ? ((double)total_size / (double)heap_after) : 0.0);
 		}
 	}
 
