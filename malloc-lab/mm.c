@@ -122,7 +122,7 @@ team_t team = {
 #define TINY_BATCH_MIN 16
 #endif
 #ifndef TINY_BATCH_MAX
-#define TINY_BATCH_MAX 128
+#define TINY_BATCH_MAX 64
 #endif
 
 /*segregated free list: 블록 크기를 보고 알맞은 리스트 인덱스를 구한 뒤 그 리스트 head에 삽입*/

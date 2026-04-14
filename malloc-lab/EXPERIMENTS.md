@@ -671,9 +671,9 @@ exact-size slab fallback 적용 후 관측값:
 
 ### 결과
 
-- 최고 점수: `91/100`
-- clean rebuild 기준 현재 기본값도 `91/100`
-- 탐색한 조합 안에서는 `91`을 넘는 설정은 없었다.
+- 당시 탐색 범위 안 최고 점수: `91/100`
+- clean rebuild 기준 당시 기본값도 `91/100`
+- 이 단계의 탐색 범위 안에서는 `91`을 넘는 설정은 없었다.
 
 ### 해석
 
@@ -681,5 +681,37 @@ exact-size slab fallback 적용 후 관측값:
 
 ### 결론
 
-- 현재 브랜치 기준 최적 재현 점수는 `91/100`으로 본다.
-- 다음 실험은 exact-size batch보다 다른 구조적 개선이 필요하다.
+- 이 단계 기준 최적 재현 점수는 `91/100`이었다.
+- 이후 tiny batch 범위를 더 넓혀 다시 탐색했다.
+
+## 25. tiny slab batch 범위 확장 재탐색
+
+### 목적
+
+- generalized tiny slab 공급을 유지한 채, tiny batch 상한을 더 낮춰 free list 분할 과다를 줄이면
+  `91/100`을 넘길 수 있는지 확인한다.
+
+### 탐색 범위
+
+- `TINY_SLAB_LIMIT`: `16`, `24`, `32`, `40`, `48`, `64`
+- `TINY_BATCH_MIN`: `4`, `8`, `16`, `32`
+- `TINY_BATCH_MAX`: `32`, `64`, `128`, `256`
+
+### 결과
+
+- clean rebuild 기준 최고 점수: `92/100`
+- 재현 가능한 대표 조합:
+  - `TINY_SLAB_LIMIT=32`, `TINY_BATCH_MIN=16`, `TINY_BATCH_MAX=64`
+  - `TINY_SLAB_LIMIT=32`, `TINY_BATCH_MIN=16`, `TINY_BATCH_MAX=32`
+- 기본값을 `TINY_BATCH_MAX=64`로 낮춘 뒤에도 `92/100`이 clean rebuild로 재현됐다.
+
+### 해석
+
+- 이전 `91점` 기준에서는 tiny slab batch 상한이 너무 커서 tiny free block 공급이 과도했다.
+- tiny batch 상한을 `64` 이하로 낮추자 util이 `51 -> 52`로 올라가며 총점이 `92/100`이 됐다.
+- 이 개선은 exact-size slab 종류를 늘리거나 bias를 더하는 방식이 아니라, 이미 효과가 있던 tiny generalized supply를 더 타이트하게 만든 결과다.
+
+### 결론
+
+- 현재 재현 가능한 기준점은 `92/100`이다.
+- 다음 실험은 이 `92점` 기준에서 다시 진행한다.
