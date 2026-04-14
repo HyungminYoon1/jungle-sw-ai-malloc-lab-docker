@@ -589,3 +589,67 @@ exact-size slab fallback 적용 후 관측값:
 
 - 유지 가치가 약하다.
 - `pattern-based bias`는 `trace-specific bias`보다 모양은 낫지만, 현재 데이터셋에서는 추가 점수 상승을 만들지 못했다.
+
+## 22. conservative realloc slack growth
+
+### 목적
+
+- `realloc-bal.rep`, `realloc2-bal.rep`에서 큰 블록이 작은 폭으로 반복 확장될 때, 제자리 확장 경로에만 보수적인 slack을 붙여 추가 heap growth를 줄일 수 있는지 확인한다.
+
+### 구현
+
+- `mm_realloc()`에 `realloc_target_size()` helper를 추가했다.
+- 적용 범위는 보수적으로 제한했다.
+  - 현재 블록이 충분히 큰 경우(`oldsize >= 4096`)
+  - 증가폭이 작은 경우(`<= 16`, `<= 64`)
+  - heap 끝 확장 / 다음 free block 병합 같은 제자리 확장 경로에서만 적용
+- fallback `mm_malloc()` 경로에는 slack을 넣지 않았다.
+
+### 결과
+
+- 전체: `Perf index = 47 (util) + 40 (thru) = 87/100`
+- `correct:11`
+- 개별 trace:
+  - `realloc-bal.rep`: `57/100`
+  - `realloc2-bal.rep`: `59/100`
+
+### 해석
+
+- 이전의 더 공격적인 `realloc` slack 실험보다 보수적으로 적용했지만, 결과는 동일했다.
+- 즉 현재 점수 정체는 `realloc` 제자리 확장 경로에 소폭 slack을 붙이는 것만으로는 풀리지 않았다.
+
+### 결론
+
+- 유지 가치가 없다.
+- 이 실험은 기록만 남기고 되돌린다.
+
+## 23. generalized tiny slab supply (`<= 32`)
+
+### 목적
+
+- exact-size 하드코딩된 `24` 공급 대신, tiny class 전체를 하나의 공통 공급 정책으로 처리해서
+  `binary2` 계열의 tiny/medium 교차 배치를 완화하고 다른 trace에서도 재사용성을 개선할 수 있는지 확인한다.
+
+### 구현
+
+- `TINY_SLAB_LIMIT`를 도입하고 `<= 32` 요청을 공통 tiny slab 공급 경로로 처리했다.
+- tiny 요청은 `CHUNKSIZE / asize` 기반 batch로 carve하되, batch 수를 `16~128` 범위로 제한했다.
+- 기존 exact-size slab는 `72`, `120`, `456`만 유지하고, `24`는 tiny generalized supply가 담당하게 했다.
+
+### 결과
+
+- 전체: `Perf index = 48 (util) + 40 (thru) = 88/100`
+- `correct:11`
+- 개별 trace:
+  - `binary2-bal.rep`: `75/100`
+  - `coalescing-bal.rep`: `80/100`
+
+### 해석
+
+- `binary2` 자체의 점수는 크게 바뀌지 않았지만, 전체 util이 1점 상승했다.
+- tiny class를 별도 공급원으로 분리한 것이 여러 trace에서의 배치 안정성에 약하게나마 도움이 된 것으로 보인다.
+
+### 결론
+
+- 현재까지의 패턴 기반 브랜치에서 가장 좋은 결과다.
+- 다음 단계는 `TINY_SLAB_LIMIT`를 `24`, `40`으로 각각 비교해 현재 `88점`보다 더 나아지는지 확인하는 것이다.

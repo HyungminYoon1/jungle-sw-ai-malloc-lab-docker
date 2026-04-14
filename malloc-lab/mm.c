@@ -87,6 +87,7 @@ team_t team = {
 #define SEARCHLIMIT 10
 // 분할 후 남는 블록이 이 값보다 작으면 split하지 않는다.
 #define SPLITLIMIT 32
+#define TINY_SLAB_LIMIT 32
 #define OVERFIT_EXACT_SLAB 1
 #define PATTERN_ALT_THRESHOLD 6
 #define PATTERN_FREE_BURST_THRESHOLD 32
@@ -119,6 +120,7 @@ static int is_exact_slab_size(size_t asize);
 static int exact_slab_batch(size_t asize);
 static int narrow_slab_size(size_t asize);
 static int narrow_slab_batch(size_t asize);
+static int tiny_slab_batch(size_t asize);
 static int should_use_narrow_slab(size_t asize);
 static int class_is_small(int index);
 static int class_is_medium(int index);
@@ -198,7 +200,7 @@ static void set_next_prev_alloc(void *bp, size_t prev_alloc)
 static int is_exact_slab_size(size_t asize)
 {
 #if OVERFIT_EXACT_SLAB
-    return asize == 24 || asize == 72 || asize == 120 || asize == 456;
+    return asize == 72 || asize == 120 || asize == 456;
 #else
     (void)asize;
     return 0;
@@ -208,8 +210,6 @@ static int is_exact_slab_size(size_t asize)
 static int exact_slab_batch(size_t asize)
 {
     switch (asize) {
-    case 24:
-        return 128;
     case 72:
         return 48;
     case 120:
@@ -219,6 +219,18 @@ static int exact_slab_batch(size_t asize)
     default:
         return 1;
     }
+}
+
+static int tiny_slab_batch(size_t asize)
+{
+    int batch = (int)(CHUNKSIZE / asize);
+
+    if (batch < 16)
+        batch = 16;
+    if (batch > 128)
+        batch = 128;
+
+    return batch;
 }
 
 static int narrow_slab_size(size_t asize)
@@ -804,6 +816,17 @@ void *mm_malloc(size_t size)
                 return bp;
             }
         }
+    }
+
+    if (asize <= TINY_SLAB_LIMIT) {
+        bp = alloc_from_slab(asize, tiny_slab_batch(asize));
+        if (bp == NULL)
+            return NULL;
+        note_malloc_completion();
+#if DEBUG_LEVEL
+        mm_checkheap(DEBUG_LEVEL - 1);
+#endif
+        return bp;
     }
 
     if (is_exact_slab_size(asize)) {
