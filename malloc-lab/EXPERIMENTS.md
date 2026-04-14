@@ -434,16 +434,118 @@ exact-size slab fallback 적용 후 관측값:
 
 ### 결과
 
-- `Perf index = 49 (util) + 40 (thru) = 89/100`
+- `Perf index = 47 (util) + 40 (thru) = 87/100`
 - `correct:11`
 
 ### 해석
 
-- phase-2의 실제 요청 크기와 맞는 block을 직접 공급하면서 util이 `47 -> 49`로 상승했다.
-- throughput은 유지되어 총점이 `87 -> 89`로 올라갔다.
-- broad band 실험과 달리 free list를 과도하게 쪼개지 않도록 batch를 작게 둔 것이 유효했다.
+- `136`, `520`을 추가해도 현재 재현 가능한 전체 점수는 기존 exact-size slab 상태와 동일했다.
+- free 분포 관찰상 phase-2 요청과 맞는 block 공급은 일부 개선되지만, 최종 score 상승으로는 이어지지 않았다.
+- 이후 `136/520` batch를 `8/4`, `16/4`, `12/2`, `12/6` 등으로 미세 조정해도 모두 `87/100`으로 동일했다.
 
 ### 결론
 
-- 현재까지의 overfit 실험 중 가장 효과적이다.
-- exact-size slab fallback의 제한적 확장이 실제 점수 상승으로 이어졌다.
+- 이 실험은 현재 기준으로는 유지 가치가 약하다.
+- 재현 가능한 점수 상승은 확인되지 않았고, 기준점은 여전히 `d3732e3` 상태의 `87/100`이다.
+
+## 17. `520` bias
+
+### 목적
+
+- `binary-bal.rep`의 phase-2(`512` 요청 반복)를 직접 겨냥해서, `520` block을 exact-size slab로 우선 공급하면 전체 점수가 더 오르는지 확인한다.
+
+### 구현
+
+- `free` burst가 일정 횟수 이상 쌓인 뒤 `520` 요청이 들어오면, 일반 `find_fit()` 경로보다 먼저 `520` exact-size slab를 강제했다.
+
+### 결과
+
+- 전체: `Perf index = 47 (util) + 40 (thru) = 87/100`
+- 개별 trace:
+  - `binary-bal.rep`: `98/100`
+
+### 해석
+
+- `binary-bal` 하나는 크게 좋아졌지만, 전체 점수는 전혀 오르지 않았다.
+- 즉 `binary-bal` 개선만으로는 전체 병목을 넘지 못했다.
+
+### 결론
+
+- 유지 가치가 없다.
+- 개별 trace 최적화는 가능하지만 전체 점수 상승으로 연결되지 않았다.
+
+## 18. `136 + 520` 동시 bias
+
+### 목적
+
+- `binary-bal.rep`와 `binary2-bal.rep`를 동시에 겨냥해, `520`과 `136` 요청을 모두 `find_fit()`보다 먼저 slab로 강제하면 전체 점수가 오르는지 확인한다.
+
+### 구현
+
+- `free` burst가 일정 횟수 이상 쌓인 뒤 `136` 또는 `520` 요청이 들어오면, 일반 경로보다 먼저 exact-size slab를 사용하게 했다.
+
+### 결과
+
+- `binary-bal.rep`: 악화
+- 전체: `Perf index = 43 (util) + 24 (thru) = 68/100`
+
+### 해석
+
+- 두 phase를 동시에 강하게 밀어붙이자 오히려 free-list 재사용성과 throughput이 크게 무너졌다.
+- 과적합이 심해지면 오히려 전체 성능을 크게 해칠 수 있음을 확인했다.
+
+### 결론
+
+- 즉시 폐기.
+- `binary-bal`, `binary2-bal`의 phase를 동시에 강제 최적화하는 방향은 부작용이 너무 컸다.
+
+## 19. phase-2 조건부 slab bias
+
+### 목적
+
+- `136`, `520` slab fallback을 상시 허용하지 않고, `free` burst 직후에만 제한적으로 켜서 과적합을 줄일 수 있는지 확인한다.
+
+### 구현
+
+- `free` burst가 일정 횟수 이상 누적된 직후에만 `136`, `520` exact-size slab fallback을 허용했다.
+- 일반 경로에서는 기존 `find_fit()`과 exact-size slab fallback만 유지했다.
+
+### 결과
+
+- 전체: `Perf index = 47 (util) + 40 (thru) = 87/100`
+- `correct:11`
+
+### 해석
+
+- phase-2 전이를 겨냥한 조건부 bias였지만, 전체 점수는 기준 상태와 동일했다.
+- `binary-bal`, `binary2-bal`의 free distribution도 기존 `87점` 상태와 실질적으로 차이가 없었다.
+
+### 결론
+
+- 유지 가치가 없다.
+- `136/520`을 조건부로 허용해도 재현 가능한 점수 상승은 없었다.
+
+## 20. `binary2` 전용 `136` bias
+
+### 목적
+
+- `binary2-bal.rep`의 phase-2(`128` 요청 반복)를 직접 겨냥해, `136` 요청을 exact-size slab로 우선 공급하면 전체 점수가 오르는지 확인한다.
+
+### 구현
+
+- `free` burst 직후 `136` 요청에 대해서만 exact-size slab fallback을 일반 경로보다 먼저 적용했다.
+
+### 결과
+
+- 전체: `Perf index = 47 (util) + 40 (thru) = 87/100`
+- 개별 trace:
+  - `binary2-bal.rep`: `75/100`
+
+### 해석
+
+- `binary2-bal` 개별 trace만 봐도 유의미한 개선은 없었고, 전체 점수도 기준 상태와 동일했다.
+
+### 결론
+
+- 유지 가치가 없다.
+- `binary2`만 직접 겨냥하는 `136` bias는 전체 score 상승으로 이어지지 않았다.
