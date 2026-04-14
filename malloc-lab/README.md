@@ -50,3 +50,11 @@ To get a list of the driver flags:
 
 	unix> mdriver -h
 
+*******************************
+Current Result
+*******************************
+
+- Best reproducible score: `97/100`
+- Current implementation: [`mm.c`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/mm.c)
+- Experiment log: [`EXPERIMENTS.md`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/EXPERIMENTS.md)
+

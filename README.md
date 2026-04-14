@@ -52,7 +52,14 @@
 ## 참고 자료
 
 - [`malloc-lab/README.md`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/README.md): 원본 Malloc Lab 안내
+- [`malloc-lab/EXPERIMENTS.md`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/EXPERIMENTS.md): 구현 실험 기록 및 점수 변화
 - `CS:APP` 9장
 - CMU Malloc Lab PDF
 
 이 저장소의 목적은 Docker 설정 자체가 아니라, **Malloc Lab 구현을 빠르게 시작하고 반복적으로 실험할 수 있는 작업 환경**을 제공하는 데 있습니다.
+
+## 현재 결과
+
+- 최고 재현 점수: `97/100`
+- 구현 위치: [`malloc-lab/mm.c`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/mm.c)
+- 상세 실험 과정: [`malloc-lab/EXPERIMENTS.md`](/workspaces/jungle-sw-ai-malloc-lab-docker/malloc-lab/EXPERIMENTS.md)
